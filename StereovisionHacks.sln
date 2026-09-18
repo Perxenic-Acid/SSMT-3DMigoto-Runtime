@@ -21,7 +21,6 @@ EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Build Tools", "Build Tools", "{09915712-7D63-41F9-8110-D5667F1F9FCF}"
 	ProjectSection(SolutionItems) = preProject
 		7zip\7za.exe = 7zip\7za.exe
-		CopyToGames.bat = CopyToGames.bat
 		Publish.bat = Publish.bat
 	EndProjectSection
 EndProject

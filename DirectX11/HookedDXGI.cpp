@@ -21,6 +21,7 @@
 #include "log.h"
 #include "util.h"
 #include "D3D11Wrapper.h"
+#include "SSMTBridge.h"
 
 
 // This class is for a different approach than the wrapping of the system objects
@@ -510,6 +511,12 @@ static void wrap_factory2_swap_chain(
 	// the most important object, and return the wrapped swapchain to the game
 	// so it will call our Present.
 	*ppSwapChain = hackerSwapChain;
+
+	SSMTBridge::NotifyD3D11Ready(
+		hackerDevice,
+		hackerContext,
+		hackerSwapChain
+	);
 
 	LogInfo("-> HackerSwapChain = %p wrapper of ppSwapChain = %p\n\n", hackerSwapChain, origSwapChain);
 }

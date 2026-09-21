@@ -104,6 +104,7 @@ public:
 	LARGE_INTEGER post_time_spent;
 	unsigned pre_executions;
 	unsigned post_executions;
+	unsigned profiling_generation = 0;
 
 	virtual ~CommandListCommand() {};
 
@@ -185,6 +186,7 @@ public:
 	LARGE_INTEGER time_spent_inclusive;
 	LARGE_INTEGER time_spent_exclusive;
 	unsigned executions;
+	unsigned profiling_generation = 0;
 
 	bool runtime_populated = false;
 
@@ -206,6 +208,7 @@ private:
 extern std::vector<CommandList*> registered_command_lists;
 extern std::unordered_set<CommandList*> command_lists_profiling;
 extern std::unordered_set<CommandListCommand*> command_lists_cmd_profiling;
+void clear_command_list_profiling();
 
 // Forward declaration to avoid circular reference since Override.h includes
 // HackerDevice.h includes HackerContext.h includes CommandList.h
@@ -644,6 +647,13 @@ struct PoolElement
 		Mixed,
 	};
 
+	enum class ResetType
+	{
+		All,
+		Resource,
+		Variable
+	};
+
 	Type type = Type::None;
 	CustomResource* resource = nullptr;      // Lifetime managed by global resource registry `customResources`.
 	CommandListVariable* variable = nullptr; // Lifetime managed by global variable registry `command_list_globals`.
@@ -685,7 +695,7 @@ public:
 	CustomResourcePool* ResolvePool();
 	void CopyMetadataFrom(const CustomResourcePool& other);
 
-	void ResetElements();
+	void ResetElements(PoolElement::ResetType reset_type = PoolElement::ResetType::All);
 	void ResetPool(bool reset_elements = true);
 
 private:
@@ -697,7 +707,7 @@ private:
 
 	void ResetResource(CustomResource* custom_resource);
 	void ResetVariable(CommandListVariable* variable);
-	void ResetElement(size_t pool_index);
+	void ResetElement(size_t pool_index, PoolElement::ResetType reset_type = PoolElement::ResetType::All);
 
 	void PostponeExpiration(PoolSlot& pool_slot, bool is_assignment);
 	void ExpireElements();
@@ -717,6 +727,13 @@ private:
 
 typedef std::unordered_map<std::wstring, CustomResourcePool> CustomResourcePools;
 extern CustomResourcePools customResourcePools;
+
+// Bind flags of a custom resource referenced into another custom resource or
+// pool depend on where that destination is referenced in turn, which may be
+// parsed later (section parse order is arbitrary). Edges are collected while
+// parsing and resolved to a fixed point once every command list is parsed.
+void ClearDeferredBindFlags();
+void PropagateDeferredBindFlags();
 
 // Forward declaration since TextureOverride also contains a command list
 struct TextureOverride;
@@ -787,40 +804,39 @@ enum class ResourceCopyTargetEvaluationMode : uint32_t {
 	INVALID                = 0b00000000000000000000000000000000,
 
 	// RESOURCE
-	RESOURCE               = 0b00000000000000000000000000000001,
-	RESOURCE_IDENTITY      = 0b00000000000000000000000000000010,
-	RESOURCE_STRIDE        = 0b00000000000000000000000000000100,
-	RESOURCE_SOURCE_STRIDE = 0b00000000000000000000000000001000,
-	RESOURCE_SIZE          = 0b00000000000000000000000000010000,
-	RESOURCE_OFFSET        = 0b00000000000000000000000000100000,
-	RESOURCE_REGION_HASH   = 0b00000000000000000000000001000000,
-	RESOURCE_SPATIAL_HASH  = 0b00000000000000000000000010000000,
-	RESOURCE_REGION        = 0b00000000000000000000000100000000,
-	RESOURCE_FORMAT        = 0b00000000000000000000001000000000,
-	RESOURCE_WIDTH         = 0b00000000000000000000010000000000,
-	RESOURCE_HEIGHT        = 0b00000000000000000000100000000000,
-	RESOURCE_ARRAY         = 0b00000000000000000001000000000000,
-	RESOURCE_MIPS          = 0b00000000000000000010000000000000,
-	RESOURCE_BIND_FLAGS    = 0b00000000000000000100000000000000,
-	RESOURCE_MASK          = 0b00000000000000000111111111111111,
+	RESOURCE                 = 0b00000000000000000000000000000001,
+	RESOURCE_IDENTITY        = 0b00000000000000000000000000000010,
+	RESOURCE_STRIDE          = 0b00000000000000000000000000000100,
+	RESOURCE_SOURCE_STRIDE   = 0b00000000000000000000000000001000,
+	RESOURCE_SIZE            = 0b00000000000000000000000000010000,
+	RESOURCE_OFFSET          = 0b00000000000000000000000000100000,
+	RESOURCE_REGION_HASH     = 0b00000000000000000000000001000000,
+	RESOURCE_SPATIAL_HASH    = 0b00000000000000000000000010000000,
+	RESOURCE_REGION          = 0b00000000000000000000000100000000,
+	RESOURCE_FORMAT          = 0b00000000000000000000001000000000,
+	RESOURCE_WIDTH           = 0b00000000000000000000010000000000,
+	RESOURCE_HEIGHT          = 0b00000000000000000000100000000000,
+	RESOURCE_ARRAY           = 0b00000000000000000001000000000000,
+	RESOURCE_MIPS            = 0b00000000000000000010000000000000,
+	RESOURCE_BIND_FLAGS      = 0b00000000000000000100000000000000,
+	RESOURCE_MASK            = 0b00000000000000000111111111111111,
 
 	// POOL
-	POOL_IDENTITY          = 0b00000000000000001000000000000000,
-	POOL_SIZE              = 0b00000000000000010000000000000000,
-	POOL_INDEX             = 0b00000000000000100000000000000000,
-	POOL_FULL_RANGE        = 0b00000000000001000000000000000000,
-	POOL_LAST_FRAME        = 0b00000000000010000000000000000000,
+	POOL_IDENTITY            = 0b00000000000000001000000000000000,
+	POOL_SIZE                = 0b00000000000000010000000000000000,
+	POOL_INDEX               = 0b00000000000000100000000000000000,
+	POOL_FULL_RANGE_RESOURCE = 0b00000000000001000000000000000000,
+	POOL_FULL_RANGE_VARIABLE = 0b00000000000010000000000000000000,
+	POOL_LAST_FRAME          = 0b00000000000100000000000000000000,
 
-	POOL_MASK              = 0b00000000000011111000000000000000,
+	POOL_MASK                = 0b00000000000111111000000000000000,
 
 	// VARIABLE
-	VARIABLE               = 0b00000000000100000000000000000000,
+	VARIABLE                 = 0b00000000001000000000000000000000,
 
 	// LAYOUT
-	LAYOUT_ELEMENT_FORMAT  = 0b00000000001000000000000000000000,
-	LAYOUT_ELEMENT_OFFSET  = 0b00000000010000000000000000000000,
-
-	LAYOUT_MASK            = 0b00000000011000000000000000000000
+	LAYOUT_ELEMENT_FORMAT    = 0b00000000010000000000000000000000,
+	LAYOUT_ELEMENT_OFFSET    = 0b00000000100000000000000000000000,
 };
 SENSIBLE_ENUM(ResourceCopyTargetEvaluationMode);
 static EnumName_t<const wchar_t*, ResourceCopyTargetEvaluationMode> ResourceCopyTargetEvaluationModeNames[] = {
@@ -842,7 +858,8 @@ static EnumName_t<const wchar_t*, ResourceCopyTargetEvaluationMode> ResourceCopy
 	{L"PoolIdentity", ResourceCopyTargetEvaluationMode::POOL_IDENTITY},
 	{L"PoolSize", ResourceCopyTargetEvaluationMode::POOL_SIZE},
 	{L"PoolIndex", ResourceCopyTargetEvaluationMode::POOL_INDEX},
-	{L"PoolFullRange", ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE},
+	{L"PoolFullRangeResource", ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE_RESOURCE},
+	{L"PoolFullRangeVariable", ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE_VARIABLE},
 
 	{L"Variable", ResourceCopyTargetEvaluationMode::VARIABLE},
 
@@ -980,9 +997,18 @@ public:
 	CustomResourcePool* custom_resource_pool = nullptr;
 	std::unique_ptr<CommandListExpression> pool_dynamic_index_expression = nullptr;
 
+	// Pipeline slot given as an expression (ps-t[$i]); slot is resolved
+	// at runtime and must stay below max_slot:
+	std::unique_ptr<CommandListExpression> slot_expression = nullptr;
+	unsigned max_slot = 0;
+
 	bool forbid_view_cache = false;
 
 	bool ParseTarget(const wchar_t *target, bool is_source, const wstring *ini_namespace, CommandListScope* scope, bool allow_custom = true);
+
+	// Slot for this draw, or UINT_MAX (with a warning) if a dynamic slot
+	// expression is out of range:
+	unsigned ResolveSlot(CommandListState *state);
 
 	void SetCustomResource(CustomResource* resource);
 
@@ -1032,7 +1058,8 @@ public:
 private:
 	IniParserResult ParseTargetPrefix(const wchar_t*& target, size_t& length);
 	IniParserResult ParseTargetMember(const wchar_t*& target, size_t& length, wstring& temp_target, const wstring* ini_namespace, CommandListScope* scope);
-	IniParserResult ParseTargetPipelineSlot(const wchar_t*& target, size_t length, bool is_source);
+	IniParserResult ParseTargetPipelineSlot(const wchar_t*& target, size_t length, bool is_source, const wstring* ini_namespace, CommandListScope* scope);
+	IniParserResult ParseTargetSlotExpression(const wchar_t* text, size_t length, const wstring* ini_namespace, CommandListScope* scope);
 	IniParserResult ParseTargetCustomResource(const wchar_t*& target, size_t length, const wstring* ini_namespace, CommandListScope* scope);
 	IniParserResult ParseTargetPool(const wchar_t*& target, size_t length, const wstring* ini_namespace, CommandListScope* scope, bool is_source);
 
@@ -1096,6 +1123,17 @@ static EnumName_t<const wchar_t *, ResourceCopyOptions> ResourceCopyOptionNames[
 // overwrite - instead of creating a new resource for a copy operation, overwrite the resource already assigned to the destination (if it exists and is compatible)
 
 
+// What a ResourceCopyOperation would have bound to its destination slot,
+// collected by a batch so several slots can be set with one call. The
+// references are owned by the batch.
+struct DeferredBinding {
+	ID3D11Resource *resource = nullptr;
+	ID3D11View *view = nullptr;
+	UINT offset = 0;   // Constant buffers only, in bytes
+	UINT size = 0;
+	bool assigned = false; // false: unless_null kept the current binding
+};
+
 class ResourceCopyOperation : public CommandListCommand {
 public:
 	ResourceCopyTarget src;
@@ -1106,6 +1144,10 @@ public:
 	ResourcePool resource_pool;
 	ID3D11View *cached_view;
 
+	// Set by ShaderResourceBindBatch while it runs this operation: the
+	// resolved binding is handed back through here instead of being bound.
+	DeferredBinding *deferred = nullptr;
+
 	ResourceCopyOperation();
 	~ResourceCopyOperation();
 
@@ -1113,7 +1155,45 @@ public:
 	void CopyResourceToPool(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_src_size);
 
 	void run(CommandListState*) override;
+	// Used by ShaderResourceFetchBatch, which fetched the source itself:
+	void RunWithSource(CommandListState* state, ID3D11Resource* src_resource, ID3D11View* src_view);
+
+private:
+	void SetOrDeferResource(CommandListState* state, ID3D11Resource* res, ID3D11View* view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size);
 };
+
+// Adjacent resource copies between a contiguous range of shader resource
+// slots and custom resources, merged by the optimiser into a single
+// XXGet/SetShaderResources call. The operations still resolve their own
+// views and run in ini order, so duplicate slots and unless_null keep their
+// sequential meaning.
+class ShaderResourceBatch : public CommandListCommand {
+public:
+	wchar_t shader_type = L'\0';
+	unsigned first_slot = 0;
+	unsigned count = 0;
+	// Bind only: at least one operation is unless_null, so the batch reads
+	// the current bindings of its whole range first and only overwrites the
+	// slots whose operation actually assigned something. Everything else
+	// (unless_null slots with a null source, gaps between slots) is written
+	// back as it was:
+	bool prefetch_current_bindings = false;
+	std::vector<std::shared_ptr<ResourceCopyOperation>> operations;
+};
+
+// "<stage>-tN = ref ResourceFoo" lines: one XXSetShaderResources
+class ShaderResourceBindBatch : public ShaderResourceBatch {
+public:
+	void run(CommandListState*) override;
+};
+
+// "ResourceFoo = ref <stage>-tN" lines: one XXGetShaderResources
+class ShaderResourceFetchBatch : public ShaderResourceBatch {
+public:
+	void run(CommandListState*) override;
+};
+
+void merge_shader_resource_batches(CommandList *command_list);
 
 class PoolCopyOperation : public CommandListCommand {
 public:

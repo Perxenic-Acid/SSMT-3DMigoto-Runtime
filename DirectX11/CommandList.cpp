@@ -49,17 +49,30 @@ struct command_list_profiling_state {
 	LARGE_INTEGER saved_recursive_time;
 };
 
+// Command lists and commands register themselves in the profiling sets the
+// first time they run in a collection window. The generation counter lets
+// them notice a new window from a cheap compare instead of a set insert on
+// every execution, which at thousands of executions per frame was a
+// measurable chunk of the "Command lists total" it reports:
+static unsigned profiling_generation = 1;
+
+void clear_command_list_profiling()
+{
+	command_lists_profiling.clear();
+	command_lists_cmd_profiling.clear();
+	profiling_generation++;
+}
+
 static inline void profile_command_list_start(CommandList *command_list, CommandListState *state,
 		command_list_profiling_state *profiling_state)
 {
-	bool inserted;
-
 	if ((Profiling::mode != Profiling::Mode::SUMMARY)
 	 && (Profiling::mode != Profiling::Mode::TOP_COMMAND_LISTS))
 		return;
 
-	inserted = command_lists_profiling.insert(command_list).second;
-	if (inserted) {
+	if (command_list->profiling_generation != profiling_generation) {
+		command_list->profiling_generation = profiling_generation;
+		command_lists_profiling.insert(command_list);
 		command_list->time_spent_inclusive.QuadPart = 0;
 		command_list->time_spent_exclusive.QuadPart = 0;
 		command_list->executions = 0;
@@ -91,13 +104,12 @@ static inline void profile_command_list_end(CommandList *command_list, CommandLi
 static inline void profile_command_list_cmd_start(CommandListCommand *cmd,
 		command_list_profiling_state *profiling_state)
 {
-	bool inserted;
-
 	if (Profiling::mode != Profiling::Mode::TOP_COMMANDS)
 		return;
 
-	inserted = command_lists_cmd_profiling.insert(cmd).second;
-	if (inserted) {
+	if (cmd->profiling_generation != profiling_generation) {
+		cmd->profiling_generation = profiling_generation;
+		command_lists_cmd_profiling.insert(cmd);
 		cmd->pre_time_spent.QuadPart = 0;
 		cmd->post_time_spent.QuadPart = 0;
 		cmd->pre_executions = 0;
@@ -552,6 +564,9 @@ void optimise_command_lists(HackerDevice *device)
 		// add a special command for that particular case, but would be
 		// nice if this sort of thing worked more generally.
 	} while (making_progress);
+
+	for (CommandList *command_list : registered_command_lists)
+		merge_shader_resource_batches(command_list);
 
 	Profiling::update_cto_warning(!ignore_cto_post);
 
@@ -7464,13 +7479,13 @@ void CustomResourcePool::CopyMetadataFrom(const CustomResourcePool& src)
 	Initialize(src.pool_size);
 }
 
-void CustomResourcePool::ResetElements()
+void CustomResourcePool::ResetElements(PoolElement::ResetType reset_type)
 {
 	if (source_pool)
-		return source_pool->ResetElements();
+		return source_pool->ResetElements(reset_type);
 
 	for (size_t i = 0; i < pool_size; ++i)
-		ResetElement(i);
+		ResetElement(i, reset_type);
 }
 
 void CustomResourcePool::ResetPool(bool reset_elements)
@@ -7596,25 +7611,49 @@ void CustomResourcePool::ResetVariable(CommandListVariable* variable)
 	variable->fval = variable_template->fval;
 }
 
-void CustomResourcePool::ResetElement(size_t pool_index)
+void CustomResourcePool::ResetElement(size_t pool_index, PoolElement::ResetType reset_type)
 {
 	PoolElement& element = elements[pool_index];
 	switch (element.type)
 	{
 	case PoolElement::Type::Resource:
-		ResetResource(element.resource);
-		break;
+		if (reset_type == PoolElement::ResetType::All || reset_type == PoolElement::ResetType::Resource)
+		{
+			ResetResource(element.resource);
+			element.type = PoolElement::Type::None;
+		}
+		return;
 
 	case PoolElement::Type::Variable:
-		ResetVariable(element.variable);
-		break;
+		if (reset_type == PoolElement::ResetType::All || reset_type == PoolElement::ResetType::Variable)
+		{
+			ResetVariable(element.variable);
+			element.type = PoolElement::Type::None;
+		}
+		return;
 
 	case PoolElement::Type::Mixed:
-		ResetResource(element.resource);
-		ResetVariable(element.variable);
-		break;
+		// For Mixed type we do not reset element type.
+		// As of now, it's only used for SwitchElementType, which is effectively disabled for Mixed type pools.
+		switch (reset_type) {
+		case PoolElement::ResetType::All:
+			ResetResource(element.resource);
+			ResetVariable(element.variable);
+			return;
+
+		case PoolElement::ResetType::Resource:
+			ResetResource(element.resource);
+			return;
+
+		case PoolElement::ResetType::Variable:
+			ResetVariable(element.variable);
+			return;
+		}
+		return;
+
+	case PoolElement::Type::None:
+		return;
 	}
-	element.type = PoolElement::Type::None;
 }
 
 void CustomResourcePool::PostponeExpiration(PoolSlot& pool_slot, bool is_assignment)
@@ -8081,7 +8120,10 @@ IniParserResult ResourceCopyTarget::ParseTargetPool(const wchar_t*& target, size
 		if (is_source)
 			return IniParserResult::SYNTAX_ERROR;
 		type = ResourceCopyTargetType::POOL;
-		evaluation_mode = ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE;
+		if (evaluation_mode == ResourceCopyTargetEvaluationMode::VARIABLE)
+			evaluation_mode = ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE_VARIABLE;
+		else
+			evaluation_mode = ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE_RESOURCE;
 		return IniParserResult::TOKEN_FOUND;
 	}
 
@@ -8151,11 +8193,73 @@ constexpr bool token_equals(const wchar_t* str, size_t len, const wchar_t* token
 	return len == token_len && wmemcmp(str, token, token_len) == 0;
 }
 
-IniParserResult ResourceCopyTarget::ParseTargetPipelineSlot(const wchar_t*& target, size_t length, bool is_source)
+// Slot given in brackets: ps-t[$i] (any slot type).
+IniParserResult ResourceCopyTarget::ParseTargetSlotExpression(const wchar_t* text, size_t length, const wstring* ini_namespace, CommandListScope* scope)
+{
+	struct SlotTypeInfo {
+		const wchar_t* keyword; // Follows the stage letter when has_stage
+		size_t len;
+		ResourceCopyTargetType type;
+		bool has_stage;
+		unsigned max_slot_count;
+	};
+
+	static constexpr SlotTypeInfo slot_types[] = {
+		{ L"o",    1, ResourceCopyTargetType::RENDER_TARGET,         false, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT            },
+		{ L"vb",   2, ResourceCopyTargetType::VERTEX_BUFFER,         false, D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT         },
+		{ L"so",   2, ResourceCopyTargetType::STREAM_OUTPUT,         false, D3D11_SO_STREAM_COUNT                             },
+		{ L"s-t",  3, ResourceCopyTargetType::SHADER_RESOURCE,       true,  D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT      },
+		{ L"s-u",  3, ResourceCopyTargetType::UNORDERED_ACCESS_VIEW, true,  D3D11_1_UAV_SLOT_COUNT                            },
+		{ L"s-cb", 4, ResourceCopyTargetType::CONSTANT_BUFFER,       true,  D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT },
+	};
+
+	const wchar_t* open = wmemchr(text, L'[', length);
+	if (!open || text[length - 1] != L']')
+		return IniParserResult::TOKEN_NOT_FOUND;
+
+	size_t prefix_len = open - text;
+	const SlotTypeInfo* info = nullptr;
+	for (const auto& t : slot_types) {
+		if (t.has_stage) {
+			if (prefix_len == t.len + 1 && is_shader_resource(text[0]) && !wmemcmp(text + 1, t.keyword, t.len)) {
+				shader_type = text[0];
+				info = &t;
+				break;
+			}
+		} else if (prefix_len == t.len && !wmemcmp(text, t.keyword, t.len)) {
+			info = &t;
+			break;
+		}
+	}
+	if (!info)
+		return IniParserResult::TOKEN_NOT_FOUND;
+
+	if (info->type == ResourceCopyTargetType::UNORDERED_ACCESS_VIEW && shader_type != L'p' && shader_type != L'c')
+		return IniParserResult::SYNTAX_ERROR;
+
+	type = info->type;
+	max_slot = info->max_slot_count;
+
+	wstring inner(open + 1, text + length - 1);
+	slot_expression = std::make_unique<CommandListExpression>();
+	if (!slot_expression->parse(&inner, ini_namespace, scope)) {
+		slot_expression.reset();
+		return IniParserResult::SYNTAX_ERROR;
+	}
+	return IniParserResult::TOKEN_FOUND;
+}
+
+IniParserResult ResourceCopyTarget::ParseTargetPipelineSlot(const wchar_t*& target, size_t length, bool is_source, const wstring* ini_namespace, CommandListScope* scope)
 {
 	//LogInfo("ParseTargetPipelineSlot: target=%ls, length=%d, is_source=%d\n", target, length, is_source);
 
 	int ret, len;
+
+	if (length > 2 && target[length - 1] == L']') {
+		IniParserResult expression_ret = ParseTargetSlotExpression(target, length, ini_namespace, scope);
+		if (expression_ret != IniParserResult::TOKEN_NOT_FOUND)
+			return expression_ret;
+	}
 
 	struct TargetInfo {
 		const wchar_t* keyword;
@@ -8309,7 +8413,7 @@ bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, cons
 	}
 
 	// Parse the remainder as a pipeline slot (e.g. `vb0`, `this`, `null`).
-	ret = ParseTargetPipelineSlot(target, length, is_source);
+	ret = ParseTargetPipelineSlot(target, length, is_source, ini_namespace, scope);
 	//LogInfo("ParseTarget: %d at ParseTargetPipelineSlot\n", ret);
 	if (ret != IniParserResult::TOKEN_NOT_FOUND)
 		return ret == IniParserResult::TOKEN_FOUND;
@@ -8319,6 +8423,58 @@ bool ResourceCopyTarget::ParseTarget(const wchar_t *target, bool is_source, cons
 }
 
 #pragma endregion ParseResourceCopyTarget
+
+
+#pragma region DeferredBindFlags
+
+// (src, dst) pairs of custom resources linked by a reference copy during the
+// current config load. src must eventually carry every bind flag dst carries.
+static std::vector<std::pair<CustomResource*, CustomResource*>> deferred_bind_flags;
+
+static void DeferBindFlagsPropagation(CustomResource* src, CustomResource* dst)
+{
+	if (src && dst && src != dst)
+		deferred_bind_flags.emplace_back(src, dst);
+}
+
+void ClearDeferredBindFlags()
+{
+	deferred_bind_flags.clear();
+}
+
+void PropagateDeferredBindFlags()
+{
+	// A chain like "ResourceA = ref ResourceB" + "ps-t0 = ref ResourceA" can
+	// be parsed in either order, and the one-hop propagation done while
+	// parsing only sees the flags dst has at that moment. Walk the edges
+	// until nothing changes so flags flow through the whole chain
+	// regardless of parse order.
+	bool changed;
+	do {
+		changed = false;
+		for (const auto& edge : deferred_bind_flags) {
+			CustomResource* src = edge.first;
+			CustomResource* dst = edge.second;
+
+			if (!(dst->bind_flags & ~src->bind_flags) && !(dst->misc_flags & ~src->misc_flags))
+				continue;
+
+			D3D11_BIND_FLAG old_bind_flags = src->bind_flags;
+			D3D11_RESOURCE_MISC_FLAG old_misc_flags = src->misc_flags;
+
+			// Incompatible flags (e.g. constant_buffer) are warned about by
+			// AddFlags and leave src unchanged, so they cannot loop forever.
+			src->AddFlags(dst->bind_flags, dst->misc_flags, true);
+
+			if (src->bind_flags != old_bind_flags || src->misc_flags != old_misc_flags)
+				changed = true;
+		}
+	} while (changed);
+
+	deferred_bind_flags.clear();
+}
+
+#pragma endregion DeferredBindFlags
 
 
 #pragma region PoolCopyOperation
@@ -8343,6 +8499,7 @@ static CommandListCommand* parse_pool_copy_operation(
 			return nullptr;
 		}
 		src.custom_resource_pool->PropagateFlags(dst.custom_resource_pool->resource_template->bind_flags, dst.custom_resource_pool->resource_template->misc_flags);
+		DeferBindFlagsPropagation(src.custom_resource_pool->resource_template, dst.custom_resource_pool->resource_template);
 		break;
 
 	case ResourceCopyTargetType::EMPTY:
@@ -8399,11 +8556,23 @@ void PoolCopyOperation::run(CommandListState* state)
 		return;
 
 	case ResourceCopyTargetType::EMPTY:
-		if (dst.evaluation_mode == ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE)
-			dst.custom_resource_pool->ResetElements(); // Reset all pool elements.
-		else
-			dst.custom_resource_pool->ResetPool(false); // Reset pool index metadata and proxy state.
-		return;
+		switch (dst.evaluation_mode)
+		{
+		case ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE_RESOURCE:
+			// Set all pool resourcers to null.
+			dst.custom_resource_pool->ResetElements(PoolElement::ResetType::Resource);
+			return;
+
+		case ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE_VARIABLE:
+			// Set all pool variables to `pool_variable_default_value`.
+			dst.custom_resource_pool->ResetElements(PoolElement::ResetType::Variable);
+			return;
+
+		default:
+			// Reset pool index metadata and proxy state.
+			dst.custom_resource_pool->ResetPool(false);
+			return;
+		}
 	}
 }
 
@@ -8481,6 +8650,10 @@ static CommandListCommand* parse_resource_copy_operation(
 			LogOverlayW(LOG_WARNING, L"To use resources with incompatible flags explicitly add 'copy' keyword, e.g. 'vs-cb0 = copy ResourceRWBufferCB'\n - [%ls] @ [%ls]\n", section, ini_namespace->c_str());
 			return nullptr;
 		}
+		// dst may gain more flags from sections parsed after this one,
+		// resolved by PropagateDeferredBindFlags() once parsing is complete.
+		if (dst.type == ResourceCopyTargetType::CUSTOM_RESOURCE || dst.type == ResourceCopyTargetType::POOL)
+			DeferBindFlagsPropagation(src_custom_resource, dst.GetCustomResource(nullptr));
 	}
 
 	ResourceCopyOperation* operation = new ResourceCopyOperation();
@@ -8501,7 +8674,7 @@ static CommandListCommand* parse_layout_operation(
 	const wchar_t* section, ResourceCopyTarget& dst, wstring* val, CommandList* command_list, const wstring* ini_namespace
 )
 {
-	if (dst.type != ResourceCopyTargetType::VERTEX_BUFFER)
+	if (dst.type != ResourceCopyTargetType::VERTEX_BUFFER || dst.slot_expression)
 		return nullptr;
 
 	LayoutElementOperation* operation = new LayoutElementOperation();
@@ -8761,65 +8934,77 @@ bool ParseCommandListResourceCopyTargetDirective(
 
 	CommandListCommand* operation = nullptr;
 
-	if (dst.evaluation_mode == ResourceCopyTargetEvaluationMode::VARIABLE)
+	switch (dst.evaluation_mode)
 	{
-		// Pool Variable - Copy Exression Result To Pool Variable
-		// $PoolFoo[0] = $PoolBar[0] + $var + 1
-		operation = parse_pool_variable_operation(section, dst, val, command_list, ini_namespace, key);
-	}
-	else if (dst.evaluation_mode & ResourceCopyTargetEvaluationMode::LAYOUT_MASK)
-	{
+	case ResourceCopyTargetEvaluationMode::LAYOUT_ELEMENT_FORMAT:
+	case ResourceCopyTargetEvaluationMode::LAYOUT_ELEMENT_OFFSET:
 		// Vertex Buffer Layout Override
 		// vb0->ElementFormat(BLENDINDICES, 0) = R16G16B16A16_FLOAT
 		operation = parse_layout_operation(section, dst, val, command_list, ini_namespace);
-	}
-	else
-	{
+		break;
+
+	case ResourceCopyTargetEvaluationMode::VARIABLE:
+		// Pool Variable - Copy Exression Result To Pool Variable
+		// $PoolFoo[0] = $PoolBar[0] + $var + 1
+		operation = parse_pool_variable_operation(section, dst, val, command_list, ini_namespace, key);
+		break;
+
+	case ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE_VARIABLE:
+		// Pool Full Range Variable Assignment - Copy SRC expression result to all pool variables.
+		// $PoolFoo[*] = $PoolBar[0] + $var + 1.23
+		if (val->size() != 4 || wcsncmp(val->c_str(), L"null", 4))
+		{
+			operation = parse_pool_variable_operation(section, dst, val, command_list, ini_namespace, key);
+			break;
+		}
+		// "null" intentionally falls through to be handled by src.type == ResourceCopyTargetType::EMPTY case.
+		[[fallthrough]];
+
+	default:
 		ResourceCopyOptions options = ResourceCopyOptions::INVALID;
 		ResourceCopyTarget src = ResourceCopyTarget();
 
 		if (!parse_resource_copy_target_source(section, *val, src, options, command_list, ini_namespace, key))
-			src.type = ResourceCopyTargetType::INVALID;
-
-		if (dst.type == ResourceCopyTargetType::POOL)
-		{
-			if (src.type == ResourceCopyTargetType::POOL      // PoolFoo = ref PoolBar
-				|| src.type == ResourceCopyTargetType::EMPTY) // PoolFoo = null
-			{
-				// Pool - Copy Pool To Pool (`ref` and `copy_desc`)
-				operation = parse_pool_copy_operation(section, dst, src, options, command_list, ini_namespace);
-			}
-			else if (dst.evaluation_mode == ResourceCopyTargetEvaluationMode::POOL_FULL_RANGE)
-			{
-				switch (src.type)
-				{
-				case ResourceCopyTargetType::EMPTY: // PoolFoo[*] = null
-					// Pool - Reset All Slots
-					operation = parse_pool_copy_operation(section, dst, src, options, command_list, ini_namespace);
-					break;
-
-				case ResourceCopyTargetType::VARIABLE: // PoolFoo[*] = $PoolBar[0]
-				case ResourceCopyTargetType::INVALID:  // PoolFoo[*] = $var
-					// Pool - Copy Variable To All Slots (`val` will be re-parsed as expression)
-					operation = parse_pool_variable_operation(section, dst, val, command_list, ini_namespace, key);
-					break;
-
-				default: // PoolFoo[*] = copy ResourceBar
-					// Pool - Copy Resource To All Slots
-					operation = parse_resource_copy_operation(section, dst, src, options, command_list, ini_namespace);
-				}
-			}
-		}
-		else if (src.type != ResourceCopyTargetType::INVALID)
-		{
-			// 1. Pool Resource - Copy Resource To Slot
-			// PoolFoo[0] = copy ResourceFoo
-			// 2. Resource - Copy Resource To Resource
-			// ResourceFoo = copy vb0
-			operation = parse_resource_copy_operation(section, dst, src, options, command_list, ini_namespace);
-		}
-		else {
 			return false;
+
+		switch (src.type)
+		{
+		case ResourceCopyTargetType::VARIABLE:
+			// = $PoolBar[0]
+			// Only legal when DST is VARIABLE or POOL_FULL_RANGE_VARIABLE, which are already handled above.
+			return false;
+
+		case ResourceCopyTargetType::POOL:
+			// = ref/copy PoolBar
+			if (dst.type != ResourceCopyTargetType::POOL)
+				return false;
+			// 1. Copy Pool to Pool (`ref` and `copy_desc`).
+			//  PoolFoo = ref/copy_desc PoolBar
+			operation = parse_pool_copy_operation(section, dst, src, options, command_list, ini_namespace);
+			break;
+
+		case ResourceCopyTargetType::EMPTY:
+			// = null
+			if (dst.type == ResourceCopyTargetType::POOL)
+				// 1. Copy NULL to Pool (reset pool proxy mode).
+				//   PoolFoo = null
+				// 2. Copy NULL to Pool Full Range Resource (assign NULL to all pool resources).
+				//   PoolFoo[*] = null
+				// 3. Copy NULL to Pool Full Range Variable (assign NULL to all pool resources).
+				//   $PoolFoo[*] = null
+				operation = parse_pool_copy_operation(section, dst, src, options, command_list, ini_namespace);
+			else
+				// Copy null to Resource (assign NULL to resource).
+				//   ResourceFoo = null
+				operation = parse_resource_copy_operation(section, dst, src, options, command_list, ini_namespace);
+			break;
+
+		default:
+			// 1. Pool Resource - Copy Resource To Slot
+			//   PoolFoo[0] = copy ResourceFoo
+			// 2. Resource - Copy Resource To Resource
+			//   ResourceFoo = copy vb0
+			operation = parse_resource_copy_operation(section, dst, src, options, command_list, ini_namespace);
 		}
 	}
 
@@ -9156,6 +9341,19 @@ CommandListVariable* ResourceCopyTarget::GetPoolVariable(CommandListState* state
 	);
 }
 
+unsigned ResourceCopyTarget::ResolveSlot(CommandListState *state)
+{
+	if (!slot_expression)
+		return slot;
+
+	float value = slot_expression->evaluate(state);
+	if (value < 0 || value >= (float)max_slot) {
+		LogOverlayW(LOG_WARNING, L"Slot index %f out of range for %lcs slot type (max %u)\n", value, shader_type, max_slot - 1);
+		return UINT_MAX;
+	}
+	return (unsigned)value;
+}
+
 ID3D11Resource *ResourceCopyTarget::GetResource(
 		CommandListState *state,
 		ID3D11View **view,   // Used by textures, render targets, depth/stencil buffers & UAVs
@@ -9178,6 +9376,11 @@ ID3D11Resource *ResourceCopyTarget::GetResource(
 	D3D11_BIND_FLAG bind_flags = (D3D11_BIND_FLAG)0;
 	D3D11_RESOURCE_MISC_FLAG misc_flags = (D3D11_RESOURCE_MISC_FLAG)0;
 	unsigned i;
+
+	// Shadows the member for the dynamic slot case (ps-t[$i]):
+	unsigned slot = ResolveSlot(state);
+	if (slot == UINT_MAX)
+		return NULL;
 
 	switch(type) {
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
@@ -9489,6 +9692,11 @@ void ResourceCopyTarget::SetResource(
 	ID3D11UnorderedAccessView *unordered_view = NULL;
 	UINT uav_counter = -1; // TODO: Allow this to be set
 	int i;
+
+	// Shadows the member for the dynamic slot case (ps-t[$i]):
+	unsigned slot = ResolveSlot(state);
+	if (slot == UINT_MAX)
+		return;
 
 	switch(type) {
 	case ResourceCopyTargetType::CONSTANT_BUFFER:
@@ -9875,8 +10083,11 @@ void ResourceCopyTarget::FindTextureOverrides(CommandListState *state, bool *res
 				}
 			}
 
-			// Run Fuzzy Matching.
-			find_texture_overrides_for_resource_desc(resource, matches, state->call_info);
+			// Run Fuzzy Matching. Fuzzy candidates depend on the resource
+			// description only, not on the region, so the per resource
+			// cache applies here too - but only its fuzzy list, hash matching
+			// was done above by region_hash.
+			find_fuzzy_texture_overrides_for_resource(resource, matches, state->call_info);
 		}
 	}
 	else
@@ -11912,7 +12123,7 @@ void ResourceCopyOperation::CopyResourceToResource(
 			// this will make errors more obvious if we copy
 			// something that doesn't exist. This behaviour can be
 			// overridden with the unless_null keyword.
-			dst.SetResource(state, NULL, NULL, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
+			SetOrDeferResource(state, NULL, NULL, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
 		}
 		return;
 	}
@@ -11963,6 +12174,18 @@ void ResourceCopyOperation::CopyResourceToResource(
 	ID3D11Resource* dst_resource = NULL;
 	ID3D11View* dst_view = NULL;
 	UINT buf_dst_size = 0;
+
+	if (G->analyse_frame) {
+		UINT src_bind_flags = get_resource_bind_flags(src_resource);
+		// Reuse the already resolved custom resource to avoid evaluating
+		// a dynamic pool index twice:
+		D3D11_BIND_FLAG dst_bind_flags = dst_custom_resource ? dst_custom_resource->bind_flags : dst.BindFlags(state);
+		COMMAND_LIST_LOG(state, "  src bind_flags=0x%03x [%S] dst bind_flags=0x%03x [%S]\n",
+			src_bind_flags, lookup_enum_bit_names(CustomResourceBindFlagNames, (CustomResourceBindFlags)src_bind_flags).c_str(),
+			dst_bind_flags, lookup_enum_bit_names(CustomResourceBindFlagNames, (CustomResourceBindFlags)dst_bind_flags).c_str());
+		if (!(options & ResourceCopyOptions::COPY_MASK) && (dst_bind_flags & ~src_bind_flags))
+			COMMAND_LIST_LOG(state, "  WARNING: referenced resource is missing bind flags required by destination, view creation will fail\n");
+	}
 
 	if (options & ResourceCopyOptions::COPY_MASK) {
 		RecreateCompatibleResource(&ini_line, &src, &dst, src_resource, pp_cached_resource, p_resource_pool, src_view, pp_cached_view,
@@ -12050,7 +12273,7 @@ void ResourceCopyOperation::CopyResourceToResource(
 		buf_dst_size = 0;
 	}
 
-	dst.SetResource(state, dst_resource, dst_view, stride, offset, format, buf_dst_size);
+	SetOrDeferResource(state, dst_resource, dst_view, stride, offset, format, buf_dst_size);
 
 	if (options & ResourceCopyOptions::SET_VIEWPORT)
 		SetViewportFromResource(state, dst_resource);
@@ -12090,12 +12313,40 @@ void ResourceCopyOperation::CopyResourceToPool(
 	dst.SetCustomResource(nullptr);
 }
 
+void ResourceCopyOperation::SetOrDeferResource(CommandListState *state,
+		ID3D11Resource *res, ID3D11View *view, UINT stride, UINT offset, DXGI_FORMAT format, UINT buf_size)
+{
+	if (!deferred) {
+		dst.SetResource(state, res, view, stride, offset, format, buf_size);
+		return;
+	}
+
+	if (res)
+		res->AddRef();
+	if (view)
+		view->AddRef();
+	deferred->resource = res;
+	deferred->view = view;
+	deferred->offset = offset;
+	deferred->size = buf_size;
+	deferred->assigned = true;
+}
+
+void ResourceCopyOperation::RunWithSource(CommandListState *state, ID3D11Resource *src_resource, ID3D11View *src_view)
+{
+	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
+
+	// Same as run() for a pipeline slot source, which GetResource() returns
+	// without stride/offset/format/size:
+	CopyResourceToResource(state, src_resource, src_view, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
+}
+
 void ResourceCopyOperation::run(CommandListState *state)
 {
 	COMMAND_LIST_LOG(state, "%S\n", ini_line.c_str());
 
 	if (src.type == ResourceCopyTargetType::EMPTY) {
-		dst.SetResource(state, NULL, NULL, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
+		SetOrDeferResource(state, NULL, NULL, 0, 0, DXGI_FORMAT_UNKNOWN, 0);
 		return;
 	}
 
@@ -12133,4 +12384,260 @@ void ResourceCopyOperation::run(CommandListState *state)
 }
 
 #pragma endregion ResourceCopyOperation
+
+
+#pragma region ShaderResourceBatches
+
+static void GetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11ShaderResourceView **views)
+{
+	switch (shader_type) {
+		case L'v': context->VSGetShaderResources(first, count, views); break;
+		case L'h': context->HSGetShaderResources(first, count, views); break;
+		case L'd': context->DSGetShaderResources(first, count, views); break;
+		case L'g': context->GSGetShaderResources(first, count, views); break;
+		case L'p': context->PSGetShaderResources(first, count, views); break;
+		case L'c': context->CSGetShaderResources(first, count, views); break;
+	}
+}
+
+static void SetShaderResourcesBatch(ID3D11DeviceContext1 *context, wchar_t shader_type, UINT first, UINT count, ID3D11ShaderResourceView *const *views)
+{
+	switch (shader_type) {
+		case L'v': context->VSSetShaderResources(first, count, views); break;
+		case L'h': context->HSSetShaderResources(first, count, views); break;
+		case L'd': context->DSSetShaderResources(first, count, views); break;
+		case L'g': context->GSSetShaderResources(first, count, views); break;
+		case L'p': context->PSSetShaderResources(first, count, views); break;
+		case L'c': context->CSSetShaderResources(first, count, views); break;
+	}
+}
+
+void ShaderResourceBindBatch::run(CommandListState *state)
+{
+	ID3D11ShaderResourceView *views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
+
+	COMMAND_LIST_LOG(state, "batched %lcs-t%u..%u {\n", shader_type, first_slot, first_slot + count - 1);
+
+	if (prefetch_current_bindings)
+		GetShaderResourcesBatch(state->mOrigContext1, shader_type, first_slot, count, views);
+
+	for (auto &op : operations) {
+		DeferredBinding binding;
+
+		op->deferred = &binding;
+		op->run(state);
+		op->deferred = NULL;
+
+		if (!binding.assigned)
+			continue; // unless_null with a null source keeps the current binding
+
+		// Only the view is bound to a t slot:
+		if (binding.resource)
+			binding.resource->Release();
+
+		unsigned i = op->dst.slot - first_slot;
+		if (views[i])
+			views[i]->Release();
+		views[i] = (ID3D11ShaderResourceView*)binding.view;
+	}
+
+	SetShaderResourcesBatch(state->mOrigContext1, shader_type, first_slot, count, views);
+
+	for (unsigned i = 0; i < count; i++) {
+		if (views[i])
+			views[i]->Release();
+	}
+
+	COMMAND_LIST_LOG(state, "%s\n", "}");
+}
+
+void ShaderResourceFetchBatch::run(CommandListState *state)
+{
+	ID3D11ShaderResourceView *views[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
+
+	COMMAND_LIST_LOG(state, "batched %lcs-t%u..%u {\n", shader_type, first_slot, first_slot + count - 1);
+
+	GetShaderResourcesBatch(state->mOrigContext1, shader_type, first_slot, count, views);
+
+	for (auto &op : operations) {
+		ID3D11ShaderResourceView *view = views[op->src.slot - first_slot];
+		ID3D11Resource *resource = NULL;
+
+		if (view)
+			view->GetResource(&resource);
+
+		op->RunWithSource(state, resource, view);
+
+		if (resource)
+			resource->Release();
+	}
+
+	for (unsigned i = 0; i < count; i++) {
+		if (views[i])
+			views[i]->Release();
+	}
+
+	COMMAND_LIST_LOG(state, "%s\n", "}");
+}
+
+// Optimiser support: merge runs of adjacent slot binds / fetches. Copy
+// options don't matter: the operation still does its own copy / view
+// creation, only the final XXSetShaderResources is deferred to the batch.
+
+static bool is_batchable_bind(const ResourceCopyOperation *op)
+{
+	// Sources must not be pipeline slots, otherwise reading them all before
+	// binding any would change the meaning of e.g. a slot swap:
+	return op->dst.type == ResourceCopyTargetType::SHADER_RESOURCE
+		&& op->dst.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE
+		&& !op->dst.slot_expression
+		&& (op->src.type == ResourceCopyTargetType::CUSTOM_RESOURCE || op->src.type == ResourceCopyTargetType::EMPTY)
+		&& op->src.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE;
+}
+
+static bool is_batchable_fetch(const ResourceCopyOperation *op)
+{
+	return op->src.type == ResourceCopyTargetType::SHADER_RESOURCE
+		&& op->src.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE
+		&& !op->src.slot_expression
+		&& op->dst.type == ResourceCopyTargetType::CUSTOM_RESOURCE
+		&& op->dst.evaluation_mode == ResourceCopyTargetEvaluationMode::RESOURCE;
+}
+
+// The slot side of a batchable operation: dst for binds, src for fetches.
+static const ResourceCopyTarget& slot_target(const ResourceCopyOperation *op, bool bind)
+{
+	return bind ? op->dst : op->src;
+}
+
+// Wraps the operations of a run that fall within [first, last] into a single
+// bind / fetch batch and appends it to out. A range holding a single
+// operation is not worth a batch, that operation is appended as is.
+static void emit_slot_batch(const std::vector<std::shared_ptr<ResourceCopyOperation>> &run, bool bind,
+	unsigned first, unsigned last, bool prefetch_current_bindings, CommandList::Commands &out)
+{
+	std::shared_ptr<ShaderResourceBatch> batch;
+	if (bind)
+		batch = std::make_shared<ShaderResourceBindBatch>();
+	else
+		batch = std::make_shared<ShaderResourceFetchBatch>();
+
+	// Operations keep their ini order within the batch, so a slot assigned
+	// twice takes the last value just like it would without batching:
+	for (auto &op : run) {
+		unsigned slot = slot_target(op.get(), bind).slot;
+		if (slot >= first && slot <= last)
+			batch->operations.push_back(op);
+	}
+
+	if (batch->operations.size() < 2) {
+		out.push_back(batch->operations[0]);
+		return;
+	}
+
+	batch->shader_type = slot_target(run[0].get(), bind).shader_type;
+	batch->first_slot = first;
+	batch->count = last - first + 1;
+	batch->prefetch_current_bindings = prefetch_current_bindings;
+	// Shown in the frame analysis log in place of the individual lines:
+	batch->ini_line = batch->operations[0]->ini_line + L" ... +" + std::to_wstring(batch->operations.size() - 1);
+	out.push_back(batch);
+}
+
+// Splits a run of same-stage, same-direction operations into batches and
+// appends them to out.
+//
+// A single XXSetShaderResources call always writes every slot in its range,
+// so a batch normally only covers slots the run actually assigns: the run is
+// split wherever the (sorted, unique) slot numbers have a gap, and each
+// contiguous range becomes its own batch.
+//
+// unless_null changes that for binds. A slot whose source turned out to be
+// null has to keep its current view, and the only way to know that view is
+// to XXGetShaderResources the range up front (prefetch_current_bindings).
+// Since the current bindings are read anyway, gaps cost nothing extra: the
+// gap slots are simply written back with the view they already had, and the
+// whole run becomes one batch spanning from the lowest to the highest slot.
+static void emit_slot_batches(const std::vector<std::shared_ptr<ResourceCopyOperation>> &run, bool bind, CommandList::Commands &out)
+{
+	bool prefetch_current_bindings = false;
+	std::vector<unsigned> slots;
+
+	for (auto &op : run) {
+		slots.push_back(slot_target(op.get(), bind).slot);
+		if (bind && (op->options & ResourceCopyOptions::UNLESS_NULL))
+			prefetch_current_bindings = true;
+	}
+	std::sort(slots.begin(), slots.end());
+	slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+
+	if (prefetch_current_bindings) {
+		emit_slot_batch(run, bind, slots.front(), slots.back(), true, out);
+		return;
+	}
+
+	unsigned first = slots[0];
+	for (size_t i = 1; i < slots.size(); i++) {
+		if (slots[i] != slots[i - 1] + 1) {
+			emit_slot_batch(run, bind, first, slots[i - 1], false, out);
+			first = slots[i];
+		}
+	}
+	emit_slot_batch(run, bind, first, slots.back(), false, out);
+}
+
+// Optimiser pass: walks the command list once and replaces every run of two
+// or more adjacent batchable operations with bind / fetch batches. A run is
+// a maximal sequence of consecutive commands that are all batchable binds
+// or all batchable fetches for the same shader stage; any other command
+// (including a batchable one for another stage or direction) ends it. The
+// order of commands is preserved, batches take the place of their first
+// operation.
+void merge_shader_resource_batches(CommandList *command_list)
+{
+	CommandList::Commands out;
+	std::vector<std::shared_ptr<ResourceCopyOperation>> run;
+	bool run_is_bind = false;
+	wchar_t run_stage = L'\0';
+
+	// Ends the current run: a lone operation goes through unchanged, two or
+	// more are handed to emit_slot_batches.
+	auto flush = [&]() {
+		if (run.size() == 1)
+			out.push_back(run[0]);
+		else if (run.size() > 1)
+			emit_slot_batches(run, run_is_bind, out);
+		run.clear();
+	};
+
+	for (auto &command : command_list->commands) {
+		auto op = std::dynamic_pointer_cast<ResourceCopyOperation>(command);
+		bool bind = op && is_batchable_bind(op.get());
+		bool fetch = op && !bind && is_batchable_fetch(op.get());
+
+		if (!bind && !fetch) {
+			flush();
+			out.push_back(command);
+			continue;
+		}
+
+		wchar_t stage = slot_target(op.get(), bind).shader_type;
+		if (!run.empty() && (bind != run_is_bind || stage != run_stage))
+			flush();
+
+		run_is_bind = bind;
+		run_stage = stage;
+		run.push_back(op);
+	}
+	flush();
+
+	// Every batch replaces at least two commands, so a shorter list means
+	// something was merged:
+	if (out.size() != command_list->commands.size()) {
+		LogInfo("Merged %Iu slot operations into batches in [%S]\n", command_list->commands.size() - out.size(), command_list->ini_section.c_str());
+		command_list->commands = std::move(out);
+	}
+}
+
+#pragma endregion ShaderResourceBatches
 

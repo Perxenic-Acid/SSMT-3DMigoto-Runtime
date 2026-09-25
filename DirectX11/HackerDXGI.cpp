@@ -72,6 +72,8 @@
 #include "profiling.h"
 #include "cursor.h" // For InstallHookLate
 
+#include "SSMTBridge.h"
+
 
 // -----------------------------------------------------------------------------
 // SetWindowPos hook, activated by full_screen=2 in d3dx.ini
@@ -582,6 +584,14 @@ STDMETHODIMP HackerSwapChain::Present(THIS_
 		// which enables hunting, and snapshots, and aiming overrides and other inputs
 		RunFrameActions();
 
+		SSMTBridge::NotifyPresent(
+			mHackerDevice,
+			mHackerContext,
+			this,
+			SyncInterval,
+			Flags
+		);
+
 		if (profiling)
 			Profiling::end(&profiling_state, &Profiling::present_overhead);
 	}
@@ -884,6 +894,14 @@ STDMETHODIMP HackerSwapChain::Present1(THIS_
 		// Every presented frame, we want to take some CPU time to run our actions,
 		// which enables hunting, and snapshots, and aiming overrides and other inputs
 		RunFrameActions();
+
+		SSMTBridge::NotifyPresent(
+			mHackerDevice,
+			mHackerContext,
+			this,
+			SyncInterval,
+			PresentFlags
+		);
 
 		if (profiling)
 			Profiling::end(&profiling_state, &Profiling::present_overhead);

@@ -9,4 +9,11 @@ namespace SSMTBridge
         ID3D11Device *device,
         ID3D11DeviceContext *immediateContext,
         IDXGISwapChain *swapChain);
+
+    void NotifyPresent(
+        ID3D11Device *device,
+        ID3D11DeviceContext *immediateContext,
+        IDXGISwapChain *swapChain,
+        UINT syncInterval,
+        UINT flags);
 } // namespace SSMTBridge

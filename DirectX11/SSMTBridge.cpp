@@ -43,6 +43,46 @@ namespace
         return reinterpret_cast<
             PluginHostOnD3D11ReadyFn>(proc);
     }
+
+    using PluginHostOnPresentFn =
+        DWORD(WINAPI *)(
+            void *device,
+            void *immediateContext,
+            void *swapChain,
+            UINT syncInterval,
+            UINT flags);
+
+    PluginHostOnPresentFn
+    ResolvePresentCallback()
+    {
+        HMODULE host =
+            GetModuleHandleW(
+                L"SSMT-PluginHost.dll");
+
+        if (!host)
+        {
+            LogInfo(
+                "[SSMT] PluginHost is not loaded; Present bridge disabled.\n");
+
+            return nullptr;
+        }
+
+        FARPROC proc =
+            GetProcAddress(
+                host,
+                "SSMTPluginHost_OnPresent");
+
+        if (!proc)
+        {
+            LogInfo(
+                "[SSMT] SSMTPluginHost_OnPresent was not found; Present bridge disabled.\n");
+
+            return nullptr;
+        }
+
+        return reinterpret_cast<
+            PluginHostOnPresentFn>(proc);
+    }
 }
 
 void SSMTBridge::NotifyD3D11Ready(
@@ -67,4 +107,25 @@ void SSMTBridge::NotifyD3D11Ready(
     LogInfo(
         "[SSMT] D3D11Ready  dispatched to PluginHost, status=0x%08X\n",
         status);
+}
+
+void SSMTBridge::NotifyPresent(
+    ID3D11Device *device,
+    ID3D11DeviceContext *immediateContext,
+    IDXGISwapChain *swapChain,
+    UINT syncInterval,
+    UINT flags)
+{
+    static const PluginHostOnPresentFn callback =
+        ResolvePresentCallback();
+
+    if (!callback)
+        return;
+
+    callback(
+        device,
+        immediateContext,
+        swapChain,
+        syncInterval,
+        flags);
 }

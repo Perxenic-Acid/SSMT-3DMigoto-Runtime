@@ -99,6 +99,8 @@ else {
 # Version tag
 # ---------------------------------------------------------------------------
 
+$hasVersionTag = $true
+
 if ([string]::IsNullOrWhiteSpace($Tag)) {
     try {
         $Tag = Invoke-Git @(
@@ -109,18 +111,29 @@ if ([string]::IsNullOrWhiteSpace($Tag)) {
         )
     }
     catch {
-        throw "No version tag was found. Create a tag such as v1.4.0 first."
+        # A repository without any version tag is a valid development state.
+        # Generate a fallback 0.0.0.0 header instead of failing the build.
+        $Tag = $null
+        $hasVersionTag = $false
     }
 }
 
-$Tag = $Tag.Trim()
+if ($hasVersionTag) {
+    $Tag = $Tag.Trim()
 
-$parsed = Parse-VersionTag $Tag
+    $parsed = Parse-VersionTag $Tag
 
-$major    = $parsed.Major
-$minor    = $parsed.Minor
-$revision = $parsed.Revision
-$build    = $parsed.Build
+    $major    = $parsed.Major
+    $minor    = $parsed.Minor
+    $revision = $parsed.Revision
+    $build    = $parsed.Build
+}
+else {
+    $major    = 0
+    $minor    = 0
+    $revision = 0
+    $build    = 0
+}
 
 # ---------------------------------------------------------------------------
 # Git commit information
@@ -138,23 +151,45 @@ $workingTreeStatus = Invoke-Git @(
 
 $isDirty = -not [string]::IsNullOrWhiteSpace($workingTreeStatus)
 
-$tagCommit = Invoke-Git @(
-    "rev-list",
-    "-n",
-    "1",
-    $Tag
+if ($hasVersionTag) {
+    $tagCommit = Invoke-Git @(
+        "rev-list",
+        "-n",
+        "1",
+        $Tag
+    )
+
+    $commitsSinceTag = [int](Invoke-Git @(
+        "rev-list",
+        "$Tag..HEAD",
+        "--count"
+    ))
+
+    $isRelease = (
+        ($headCommit -eq $tagCommit) -and
+        (-not $isDirty)
+    )
+
+    if ($headCommit -ne $tagCommit) {
+        $build += $commitsSinceTag
+    }
+}
+else {
+    $tagCommit = $null
+    $commitsSinceTag = 0
+    $isRelease = $false
+}
+
+$shortCommit = Invoke-Git @(
+    "rev-parse",
+    "--short=8",
+    "HEAD"
 )
 
-$commitsSinceTag = [int](Invoke-Git @(
-    "rev-list",
-    "$Tag..HEAD",
-    "--count"
-))
+$commitDisplay = $shortCommit
 
-$isRelease = ($headCommit -eq $tagCommit)
-
-if (-not $isRelease) {
-    $build += $commitsSinceTag
+if ($isDirty) {
+    $commitDisplay += "-dirty"
 }
 
 $shortCommit = Invoke-Git @(
@@ -250,6 +285,13 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 
 $version = "$major.$minor.$revision.$build"
 
+$sourceTagDisplay = if ($hasVersionTag) {
+    $Tag
+}
+else {
+    "<none>"
+}
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -259,7 +301,7 @@ Write-Host "========================================"
 Write-Host " Generated version header"
 Write-Host "========================================"
 Write-Host "Version:            $version"
-Write-Host "Source tag:         $Tag"
+Write-Host "Source tag:         $sourceTagDisplay"
 Write-Host "Commits since tag:  $commitsSinceTag"
 Write-Host "Release build:      $isRelease"
 Write-Host "Builder:            $builder"

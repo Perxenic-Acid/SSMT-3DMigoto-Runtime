@@ -487,6 +487,16 @@ void wrap_swap_chain(HackerDevice *hackerDevice,
 	// will call our Present.
 	*ppSwapChain = swapchainWrap;
 
+	// D3D11CreateDeviceAndSwapChain reaches this helper through the legacy
+	// IDXGIFactory::CreateSwapChain path. Keep Runtime as the single source of
+	// wrapped graphics objects and notify Native through the same bridge used by
+	// the Factory2 paths.
+	SSMTBridge::NotifyD3D11Ready(
+		hackerDevice,
+		hackerDevice->GetHackerContext(),
+		swapchainWrap
+	);
+
 	LogInfo("-> HackerSwapChain = %p wrapper of ppSwapChain = %p\n", swapchainWrap, origSwapChain);
 }
 
@@ -514,7 +524,7 @@ static void wrap_factory2_swap_chain(
 
 	SSMTBridge::NotifyD3D11Ready(
 		hackerDevice,
-		hackerContext,
+		hackerDevice->GetHackerContext(),
 		hackerSwapChain
 	);
 

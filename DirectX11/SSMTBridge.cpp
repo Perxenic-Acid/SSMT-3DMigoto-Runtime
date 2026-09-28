@@ -2,6 +2,8 @@
 
 #include <Windows.h>
 
+#include <atomic>
+
 #include "log.h"
 
 namespace
@@ -35,7 +37,7 @@ namespace
         if (!proc)
         {
             LogInfo(
-                "[SSMT] SSMTPluginHost_OnD3D11Ready wad not found.\n");
+                "[SSMT] SSMTPluginHost_OnD3D11Ready was not found.\n");
 
             return nullptr;
         }
@@ -83,6 +85,27 @@ namespace
         return reinterpret_cast<
             PluginHostOnPresentFn>(proc);
     }
+
+    PluginHostOnPresentFn
+    GetPresentCallback()
+    {
+        static std::atomic<PluginHostOnPresentFn> cachedCallback = nullptr;
+        static std::atomic<unsigned> retryCounter = 0;
+
+        if (PluginHostOnPresentFn callback =
+                cachedCallback.load(std::memory_order_acquire))
+            return callback;
+
+        // A Host injected after Runtime startup is uncommon. Retry discovery at a
+        // bounded cadence so the Present path does not call GetModuleHandle on
+        // every frame while still covering late injection.
+        if (retryCounter.fetch_add(1, std::memory_order_relaxed) % 300 != 0)
+            return nullptr;
+
+        PluginHostOnPresentFn callback = ResolvePresentCallback();
+        cachedCallback.store(callback, std::memory_order_release);
+        return callback;
+    }
 }
 
 void SSMTBridge::NotifyD3D11Ready(
@@ -90,10 +113,10 @@ void SSMTBridge::NotifyD3D11Ready(
     ID3D11DeviceContext *immediateContext,
     IDXGISwapChain *swapChain)
 {
-    static PluginHostOnD3D11ReadyFn callback = nullptr;
-
-    if (!callback)
-        callback = ResolveD3D11ReadyCallback();
+    // Device creation can race PluginHost injection. Resolve on every device
+    // notification so a Host loaded after the first swap chain is still seen.
+    PluginHostOnD3D11ReadyFn callback =
+        ResolveD3D11ReadyCallback();
 
     if (!callback)
         return;
@@ -105,7 +128,7 @@ void SSMTBridge::NotifyD3D11Ready(
             swapChain);
 
     LogInfo(
-        "[SSMT] D3D11Ready  dispatched to PluginHost, status=0x%08X\n",
+        "[SSMT] D3D11Ready dispatched to PluginHost, status=0x%08X\n",
         status);
 }
 
@@ -116,8 +139,8 @@ void SSMTBridge::NotifyPresent(
     UINT syncInterval,
     UINT flags)
 {
-    static const PluginHostOnPresentFn callback =
-        ResolvePresentCallback();
+    PluginHostOnPresentFn callback =
+        GetPresentCallback();
 
     if (!callback)
         return;

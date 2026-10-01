@@ -2,24 +2,29 @@
 param(
     [switch]$SkipNativeBuild,
 
-    [switch]$SkipRuntimeBuild
+    [switch]$SkipRuntimeBuild,
+
+    [string]$TestRuntimeDir,
+
+    [string]$GameExePath,
+
+    [string]$GameArguments = '-dx11 -krqlv=hd',
+
+    [string]$PluginHostConfig
 )
 
 $ErrorActionPreference = 'Stop'
 
 $RuntimeRoot = $PSScriptRoot
 $RepoRoot = Split-Path -Parent $RuntimeRoot
-$TestRuntimeDir = Join-Path `
-    $env:USERPROFILE `
-    'Desktop\SSMT3\SSMTDefaultCacheFolder\3Dmigoto\GIMI'
+. (Join-Path $RuntimeRoot 'TestEnvironment.ps1')
+$TestRuntimeDir = Resolve-TestRuntimeDirectory $TestRuntimeDir
 $RunExe = Join-Path $TestRuntimeDir 'Run.exe'
-$PluginHostConfig = Join-Path `
-    $RepoRoot `
-    'native\SSMT-PluginHost.test.json'
+$IniPath = Join-Path $TestRuntimeDir 'd3dx.ini'
 
 function Stop-TestGame {
     $processes = @(
-        Get-Process -Name 'YuanShen' -ErrorAction SilentlyContinue
+        Get-Process -Name 'Client-Win64-Shipping' -ErrorAction SilentlyContinue
     )
 
     foreach ($process in $processes) {
@@ -36,54 +41,52 @@ function Stop-TestGame {
     }
 }
 
-Stop-TestGame
-
-foreach ($Path in @($TestRuntimeDir, $RunExe, $PluginHostConfig)) {
+foreach ($Path in @($RunExe, $IniPath)) {
     if (-not (Test-Path -LiteralPath $Path)) {
         throw "Required test path does not exist: $Path"
     }
 }
 
-$hostConfig = Get-Content -Raw -LiteralPath $PluginHostConfig |
-    ConvertFrom-Json
-
-if ($hostConfig.plugins -notcontains 'ssmt_test_plugin.dll') {
-    throw (
-        "Debug integration testing requires ssmt_test_plugin.dll " +
-        "in $PluginHostConfig."
-    )
+if ($PluginHostConfig -and -not (Test-Path -LiteralPath $PluginHostConfig -PathType Leaf)) {
+    throw "PluginHost config does not exist: $PluginHostConfig"
 }
+
+if (-not $GameExePath) {
+    $iniText = [IO.File]::ReadAllText($IniPath)
+    $loader = [regex]::Match($iniText, '(?ims)^\[Loader\][^\r\n]*\r?\n(.*?)(?=^\[|\z)')
+    $launch = [regex]::Match($loader.Groups[1].Value, '(?im)^\s*launch\s*=\s*([^\r\n]+)')
+    $GameExePath = $launch.Groups[1].Value.Trim().Trim('"')
+}
+if (-not $GameExePath -or -not (Test-Path -LiteralPath $GameExePath -PathType Leaf)) {
+    throw 'Game executable was not found. Set -GameExePath or [Loader] launch in d3dx.ini.'
+}
+
+Stop-TestGame
+Copy-Item -LiteralPath $IniPath -Destination "$IniPath.before-debug.bak" -Force
+Set-TestLoaderSetting $IniPath 'launch' $GameExePath
+Set-TestLoaderSetting $IniPath 'launch_args' $GameArguments
 
 if (-not $SkipNativeBuild) {
     & (Join-Path $RepoRoot 'build_native.ps1') `
         -Configuration Release `
-        -BuildTestPlugin `
-        -DeployToTestRuntime
+        -BuildTestPlugin:([bool]$PluginHostConfig) `
+        -DeployToTestRuntime `
+        -TestRuntimeDir $TestRuntimeDir
 }
 
 if (-not $SkipRuntimeBuild) {
-    & (Join-Path $RuntimeRoot 'release.ps1')
+    & (Join-Path $RuntimeRoot 'release.ps1') -TestRuntimeDir $TestRuntimeDir
 }
 
-if (-not (Get-Command wt.exe -ErrorAction SilentlyContinue)) {
-    throw 'Windows Terminal (wt.exe) was not found.'
+$startOptions = @{
+    FilePath = $RunExe
+    WorkingDirectory = $TestRuntimeDir
+    WindowStyle = 'Hidden'
 }
+if ($PluginHostConfig) {
+    $configPath = (Resolve-Path -LiteralPath $PluginHostConfig).ProviderPath
+    $startOptions.ArgumentList = '--plugin-host-config "' + $configPath + '"'
+}
+Start-Process @startOptions
 
-$innerScript = @"
-Set-Location -LiteralPath '$TestRuntimeDir'
-& '$RunExe' --plugin-host-config '$PluginHostConfig'
-"@
-
-$encoded = [Convert]::ToBase64String(
-    [System.Text.Encoding]::Unicode.GetBytes($innerScript)
-)
-
-Start-Process -Verb RunAs -FilePath 'wt.exe' -ArgumentList @(
-    'new-tab',
-    '-p', '{3838b87d-f3e4-4b05-8668-1bfd3ed2a45a}',
-    'pwsh.exe',
-    '-NoExit',
-    '-EncodedCommand', $encoded
-)
-
-Write-Host 'Release runtime deployed and game launch requested.'
+Write-Host "WWMI game launch requested from: $TestRuntimeDir"

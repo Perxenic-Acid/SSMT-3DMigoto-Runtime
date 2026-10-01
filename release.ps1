@@ -1,10 +1,15 @@
+[CmdletBinding()]
+param(
+    [string]$TestRuntimeDir,
+    [string]$PlatformToolset
+)
+
 $ErrorActionPreference = 'Stop'
 
 $RuntimeRoot = $PSScriptRoot
 $SolutionPath = Join-Path $RuntimeRoot 'StereoVisionHacks.sln'
-$TestRuntimeDir = Join-Path `
-    $env:USERPROFILE `
-    'Desktop\SSMT3\SSMTDefaultCacheFolder\3Dmigoto\GIMI'
+. (Join-Path $RuntimeRoot 'TestEnvironment.ps1')
+$TestRuntimeDir = Resolve-TestRuntimeDirectory $TestRuntimeDir
 
 function Resolve-MSBuild {
     $fromPath = Get-Command 'msbuild.exe' -ErrorAction SilentlyContinue
@@ -52,11 +57,32 @@ if (-not (Test-Path -LiteralPath $TestRuntimeDir -PathType Container)) {
 
 $MSBuild = Resolve-MSBuild
 
-& $MSBuild $SolutionPath `
-    /m `
-    /p:Configuration=Release `
-    /p:Platform=x64 `
-    /v:minimal
+if (-not $PlatformToolset) {
+    $targetsPath = & $MSBuild (Join-Path $RuntimeRoot 'DirectX11\DirectX11.vcxproj') `
+        /p:Configuration=Release /p:Platform=x64 /getProperty:VCTargetsPath /nologo
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to resolve Visual C++ targets path.'
+    }
+    $toolsetsPath = Join-Path ($targetsPath | Select-Object -Last 1) 'Platforms\x64\PlatformToolsets'
+    if (-not (Test-Path -LiteralPath (Join-Path $toolsetsPath 'v143'))) {
+        $PlatformToolset = Get-ChildItem -LiteralPath $toolsetsPath -Directory |
+            Where-Object { $_.Name -match '^v\d+$' } |
+            Sort-Object { [int]$_.Name.Substring(1) } -Descending |
+            Select-Object -First 1 -ExpandProperty Name
+        if (-not $PlatformToolset) {
+            throw "No Visual C++ platform toolset found: $toolsetsPath"
+        }
+    }
+}
+
+$buildArguments = @(
+    $SolutionPath, '/m', '/t:DirectX11',
+    '/p:Configuration=Release', '/p:Platform=x64', '/v:minimal'
+)
+if ($PlatformToolset) {
+    $buildArguments += "/p:PlatformToolset=$PlatformToolset"
+}
+& $MSBuild @buildArguments
 
 if ($LASTEXITCODE -ne 0) {
     throw "SSMT 3DMigoto Runtime build failed with exit code $LASTEXITCODE"

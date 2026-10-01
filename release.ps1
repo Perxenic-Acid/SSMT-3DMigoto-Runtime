@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$TestRuntimeDir,
+    [string]$GamePreset = 'GIMI',
     [string]$PlatformToolset
 )
 
@@ -9,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 $RuntimeRoot = $PSScriptRoot
 $SolutionPath = Join-Path $RuntimeRoot 'StereoVisionHacks.sln'
 . (Join-Path $RuntimeRoot 'TestEnvironment.ps1')
-$TestRuntimeDir = Resolve-TestRuntimeDirectory $TestRuntimeDir
+$TestRuntimeDir = Resolve-TestRuntimeDirectory -TestRuntimeDir $TestRuntimeDir -GamePreset $GamePreset
 
 function Resolve-MSBuild {
     $fromPath = Get-Command 'msbuild.exe' -ErrorAction SilentlyContinue

@@ -1,20 +1,30 @@
 ﻿function Resolve-TestRuntimeDirectory {
-    param([string]$TestRuntimeDir)
+    param(
+        [string]$TestRuntimeDir,
+        [string]$GamePreset = 'GIMI'
+    )
 
     if (-not $TestRuntimeDir) {
         $TestRuntimeDir = $env:SSMT_TEST_RUNTIME_DIR
     }
 
     if (-not $TestRuntimeDir) {
-        $configPath = Join-Path $env:LOCALAPPDATA 'SSMT4GlobalConfigs\Games\WWMI\Config.json'
+        if ($GamePreset -notmatch '^[A-Za-z0-9_-]+$') {
+            throw "Invalid game preset: $GamePreset"
+        }
+        $configPath = Join-Path $env:LOCALAPPDATA "SSMT4GlobalConfigs\Games\$GamePreset\Config.json"
         if (Test-Path -LiteralPath $configPath -PathType Leaf) {
             $config = Get-Content -Raw -LiteralPath $configPath -Encoding UTF8 | ConvertFrom-Json
             $TestRuntimeDir = $config.installDir
         }
     }
 
+    if (-not $TestRuntimeDir -and $GamePreset -eq 'GIMI') {
+        $TestRuntimeDir = Join-Path $env:USERPROFILE 'Desktop\SSMT3\SSMTDefaultCacheFolder\3Dmigoto\GIMI'
+    }
+
     if (-not $TestRuntimeDir -or -not (Test-Path -LiteralPath $TestRuntimeDir -PathType Container)) {
-        throw 'WWMI runtime directory was not found. Set -TestRuntimeDir or SSMT_TEST_RUNTIME_DIR.'
+        throw "Runtime directory for $GamePreset was not found. Set -TestRuntimeDir or SSMT_TEST_RUNTIME_DIR."
     }
 
     return (Resolve-Path -LiteralPath $TestRuntimeDir).ProviderPath

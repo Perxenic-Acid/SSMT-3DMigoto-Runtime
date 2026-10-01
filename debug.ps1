@@ -6,9 +6,13 @@ param(
 
     [string]$TestRuntimeDir,
 
+    [string]$GamePreset = 'GIMI',
+
     [string]$GameExePath,
 
-    [string]$GameArguments = '-dx11 -krqlv=hd',
+    [string]$GameArguments,
+
+    [switch]$StopRunningGame,
 
     [string]$PluginHostConfig
 )
@@ -18,13 +22,14 @@ $ErrorActionPreference = 'Stop'
 $RuntimeRoot = $PSScriptRoot
 $RepoRoot = Split-Path -Parent $RuntimeRoot
 . (Join-Path $RuntimeRoot 'TestEnvironment.ps1')
-$TestRuntimeDir = Resolve-TestRuntimeDirectory $TestRuntimeDir
+$TestRuntimeDir = Resolve-TestRuntimeDirectory -TestRuntimeDir $TestRuntimeDir -GamePreset $GamePreset
 $RunExe = Join-Path $TestRuntimeDir 'Run.exe'
 $IniPath = Join-Path $TestRuntimeDir 'd3dx.ini'
 
 function Stop-TestGame {
+    param([string]$ProcessName)
     $processes = @(
-        Get-Process -Name 'Client-Win64-Shipping' -ErrorAction SilentlyContinue
+        Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
     )
 
     foreach ($process in $processes) {
@@ -61,10 +66,18 @@ if (-not $GameExePath -or -not (Test-Path -LiteralPath $GameExePath -PathType Le
     throw 'Game executable was not found. Set -GameExePath or [Loader] launch in d3dx.ini.'
 }
 
-Stop-TestGame
+$gameProcessName = [IO.Path]::GetFileNameWithoutExtension($GameExePath)
+if (Get-Process -Name $gameProcessName -ErrorAction SilentlyContinue) {
+    if (-not $StopRunningGame) {
+        throw "Test game is already running: $gameProcessName. Stop it manually or pass -StopRunningGame."
+    }
+    Stop-TestGame -ProcessName $gameProcessName
+}
 Copy-Item -LiteralPath $IniPath -Destination "$IniPath.before-debug.bak" -Force
 Set-TestLoaderSetting $IniPath 'launch' $GameExePath
-Set-TestLoaderSetting $IniPath 'launch_args' $GameArguments
+if ($PSBoundParameters.ContainsKey('GameArguments')) {
+    Set-TestLoaderSetting $IniPath 'launch_args' $GameArguments
+}
 
 if (-not $SkipNativeBuild) {
     & (Join-Path $RepoRoot 'build_native.ps1') `
@@ -82,6 +95,7 @@ $startOptions = @{
     FilePath = $RunExe
     WorkingDirectory = $TestRuntimeDir
     WindowStyle = 'Hidden'
+    Verb = 'RunAs'
 }
 if ($PluginHostConfig) {
     $configPath = (Resolve-Path -LiteralPath $PluginHostConfig).ProviderPath
@@ -89,4 +103,4 @@ if ($PluginHostConfig) {
 }
 Start-Process @startOptions
 
-Write-Host "WWMI game launch requested from: $TestRuntimeDir"
+Write-Host "Game launch requested from: $TestRuntimeDir"

@@ -31,10 +31,12 @@ RHI 更新 dxgi.dll 后需要同步更新 ReShade64.dll，避免继续预加载�
 本机验证使用 ReShade 6.8.0、WWMI、鸣潮 `-dx11 -krqlv=hd`，预加载方案的日志确认 ReShade 接管交换链、加载 DLSS5 插件、绘制状态 HUD，并持续执行 NR。
 用户已确认 ReShade 菜单与 Mod 同时正常。游戏内长时间运行仍需另行验证。
 
-runtime 的开发脚本默认读取本机 `SSMT4GlobalConfigs/Games/WWMI/Config.json` 中的 installDir，也可用 `-TestRuntimeDir` 或 `SSMT_TEST_RUNTIME_DIR` 指定。
-Rust 工具链尚未准备好时，可用 `./runtime/debug.ps1 -SkipNativeBuild` 只编译部署 C++ runtime 并通过 Run.exe 启动鸣潮。
+runtime 的开发脚本默认选择 GIMI，可用 `-GamePreset SRMI` 等参数选择其他游戏，也可用 `-TestRuntimeDir` 或 `SSMT_TEST_RUNTIME_DIR` 直接指定测试目录。
+测试鸣潮时须显式指定 `-GamePreset WWMI` 或 `-TestRuntimeDir`，并按需传入 `-GameArguments '-dx11 -krqlv=hd'`。省略 `-GameArguments` 时不会改写现有启动参数。
+Rust 工具链尚未准备好时，可用 `./runtime/debug.ps1 -SkipNativeBuild -GamePreset WWMI` 只编译部署 C++ runtime 并通过 Run.exe 启动鸣潮。脚本不会默认关闭已经运行的游戏；需要此行为时显式传入 `-StopRunningGame`。
 需要 PluginHost 集成测试时，额外指定 `-PluginHostConfig`。
 
 提供给非开发者的启动入口是主仓库的 `scripts/start-wuwa-dlss5-mod.ps1`。
 部署时把它与 TestEnvironment.ps1 放到同一目录，再建立调用该脚本的桌面快捷方式。
 脚本会同步 RHI 更新后的 ReShade 副本、保留额外 DLL 列表，并在失败时显示中文提示和日志位置；已经运行游戏时不会关闭游戏。
+该脚本只复现本次鸣潮环境，不是插件组合的通用实现；新增或变更插件时，应由启用插件的贡献生成启动计划，不能沿用脚本中的固定文件名和参数作为默认值。

@@ -1,4 +1,4 @@
-// Wrapper for the ID3D11Device.
+﻿// Wrapper for the ID3D11Device.
 // This gives us access to every D3D11 call for a device, and override the pieces needed.
 
 // Object			OS				D3D11 version	Feature level
@@ -18,6 +18,7 @@
 
 #include <D3Dcompiler.h>
 #include <codecvt>
+#include <intrin.h>
 
 #include "log.h"
 #include "util.h"
@@ -240,6 +241,10 @@ static void unregister_hacker_device(HackerDevice *hacker_device)
 
 // -----------------------------------------------------------------------------------------------
 
+// ReShade 6.8 source/com_utils.hpp 中定义的原始对象查询接口。
+static const GUID IID_ReShadeUnwrappedObject = { 0x7f2c9a11, 0x3b4e, 0x4d6a,
+	{ 0x81, 0x2f, 0x5e, 0x9c, 0xd3, 0x7a, 0x1b, 0x42 } };
+
 HackerDevice::HackerDevice(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pContext1) : 
 	mIniResourceView(0), mIniTexture(0),
 	mZBufferResourceView(0)
@@ -247,6 +252,26 @@ HackerDevice::HackerDevice(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pConte
 	mOrigDevice1 = pDevice1;
 	mRealOrigDevice1 = pDevice1;
 	mOrigContext1 = pContext1;
+
+	// 未安装代理时查询失败，保留原有行为。只缓存能力和系统模块范围，
+	// 不长期持有原始设备引用，避免 Release() 无法观察到零计数。
+	ID3D11Device *unwrapped = nullptr;
+	if (SUCCEEDED(pDevice1->QueryInterface(IID_ReShadeUnwrappedObject, reinterpret_cast<void **>(&unwrapped))) && unwrapped) {
+		wchar_t system_dxgi[MAX_PATH];
+		UINT length = GetSystemDirectoryW(system_dxgi, ARRAYSIZE(system_dxgi));
+		if (length && length + ARRAYSIZE(L"\\dxgi.dll") <= ARRAYSIZE(system_dxgi) &&
+			wcscat_s(system_dxgi, L"\\dxgi.dll") == 0) {
+			HMODULE module = GetModuleHandleW(system_dxgi);
+			if (module) {
+				auto dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(module);
+				auto nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(reinterpret_cast<const BYTE *>(module) + dos->e_lfanew);
+				mSystemDxgiStart = reinterpret_cast<UINT_PTR>(module);
+				mSystemDxgiEnd = mSystemDxgiStart + nt->OptionalHeader.SizeOfImage;
+				mHasReShadeDevice = true;
+			}
+		}
+		unwrapped->Release();
+	}
 	// Must be done after mOrigDevice1 is set:
 	mUnknown = register_hacker_device(this);
 }
@@ -1542,6 +1567,23 @@ HRESULT STDMETHODCALLTYPE HackerDevice::QueryInterface(
 	/* [in] */ REFIID riid,
 	/* [iid_is][out] */ _COM_Outptr_ void __RPC_FAR *__RPC_FAR *ppvObject)
 {
+	// DuplicateOutput 要求真实的 DXGI 适配器。经 HackerDevice 转发后，
+	// ReShade 看见的调用者变成 3DMigoto，无法执行其系统 DXGI 直通分支，
+	// 会把代理适配器交给系统并在内部调用时崩溃。仅对系统 DXGI 的查询
+	// 使用原始设备；游戏和 Mod 仍通过原有包装路径。
+	if (mHasReShadeDevice && riid != IID_HackerDevice) {
+		UINT_PTR caller = reinterpret_cast<UINT_PTR>(_ReturnAddress());
+		if (caller >= mSystemDxgiStart && caller < mSystemDxgiEnd) {
+			ID3D11Device *unwrapped = nullptr;
+			if (SUCCEEDED(mOrigDevice1->QueryInterface(IID_ReShadeUnwrappedObject, reinterpret_cast<void **>(&unwrapped))) && unwrapped) {
+				HRESULT result = unwrapped->QueryInterface(riid, ppvObject);
+				// 原始对象查询和目标接口查询各自增加引用，仅释放前者。
+				unwrapped->Release();
+				return result;
+			}
+		}
+	}
+
 	LogDebug("HackerDevice::QueryInterface(%s@%p) called with IID: %s\n", type_name(this), this, NameFromIID(riid).c_str());
 
 	if (ppvObject && IsEqualIID(riid, IID_HackerDevice)) {

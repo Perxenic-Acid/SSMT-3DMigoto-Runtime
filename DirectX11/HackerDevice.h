@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <unordered_map>
 
@@ -47,6 +47,10 @@ class HackerDevice : public ID3D11Device1
 private:
 	ID3D11Device1 *mOrigDevice1;
 	ID3D11Device1 *mRealOrigDevice1;
+	// 仅在设备支持 ReShade 的原始对象查询时启用系统 DXGI 直通。
+	bool mHasReShadeDevice = false;
+	UINT_PTR mSystemDxgiStart = 0;
+	UINT_PTR mSystemDxgiEnd = 0;
 	ID3D11DeviceContext1 *mOrigContext1;
 	IUnknown *mUnknown;
 

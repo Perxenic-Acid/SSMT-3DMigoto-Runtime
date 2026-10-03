@@ -210,3 +210,6 @@ $RECYCLE.BIN/
 # 开发启动脚本生成的本机配置备份
 *.before-debug.bak
 *.before-dlss5-launch.bak
+
+# DXGI 共存测试的本机构建产物
+/tests/dxgi-interop/build/

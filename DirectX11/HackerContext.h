@@ -15,6 +15,13 @@
 DEFINE_GUID(IID_HackerContext,
 0xa3046b1e, 0x336b, 0x4d90, 0x9f, 0xd6, 0x23, 0x4b, 0xc0, 0x9b, 0x86, 0x87);
 
+// Private interop contract for components that must submit internal D3D11
+// work without re-entering GIMI's process-wide context hooks. QueryInterface
+// returns the ID3D11DeviceContext1 trampoline owned by HackerContext.
+// {91ACFD68-5A6F-45EA-B8D0-71ACC32151B7}
+DEFINE_GUID(IID_GimiPassThroughContext,
+0x91acfd68, 0x5a6f, 0x45ea, 0xb8, 0xd0, 0x71, 0xac, 0xc3, 0x21, 0x51, 0xb7);
+
 
 // Self forward reference for the factory interface.
 class HackerContext;

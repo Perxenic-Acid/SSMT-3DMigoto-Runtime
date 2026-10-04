@@ -1,6 +1,7 @@
 #pragma once
 
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
+#include <atomic>
 
 #include "HackerDevice.h"
 #include "HackerContext.h"
@@ -21,10 +22,13 @@ void InstallSetWindowPosHook();
 // Hierarchy:
 //	HackerSwapChain -> IDXGISwapChain1 -> IDXGISwapChain -> IDXGIDeviceSubObject -> IDXGIObject -> IUnknown
 
-class HackerSwapChain : public IDXGISwapChain1
+class HackerSwapChain : public IDXGISwapChain3
 {
 protected:
 	IDXGISwapChain1 *mOrigSwapChain1;
+	// Borrowed from the same COM object as mOrigSwapChain1; no extra reference.
+	IDXGISwapChain3 *mOrigSwapChain3;
+	std::atomic<HackerSwapChain *> mFrameActionOwner{nullptr};
 	HackerDevice *mHackerDevice;
 	HackerContext *mHackerContext;
 
@@ -33,6 +37,7 @@ public:
 	
 	IDXGISwapChain1* GetOrigSwapChain1();
 	void RunFrameActions();
+	void RegisterFrameActionOwner(bool device_was_wrapped);
 	Overlay *mOverlay;
 
 
@@ -185,6 +190,21 @@ public:
 	HRESULT STDMETHODCALLTYPE GetRotation(
 		/* [annotation][out] */
 		_Out_  DXGI_MODE_ROTATION *pRotation);
+
+	/** IDXGISwapChain2 / IDXGISwapChain3 **/
+	HRESULT STDMETHODCALLTYPE SetSourceSize(UINT Width, UINT Height);
+	HRESULT STDMETHODCALLTYPE GetSourceSize(UINT *pWidth, UINT *pHeight);
+	HRESULT STDMETHODCALLTYPE SetMaximumFrameLatency(UINT MaxLatency);
+	HRESULT STDMETHODCALLTYPE GetMaximumFrameLatency(UINT *pMaxLatency);
+	HANDLE STDMETHODCALLTYPE GetFrameLatencyWaitableObject(void);
+	HRESULT STDMETHODCALLTYPE SetMatrixTransform(const DXGI_MATRIX_3X2_F *pMatrix);
+	HRESULT STDMETHODCALLTYPE GetMatrixTransform(DXGI_MATRIX_3X2_F *pMatrix);
+	UINT STDMETHODCALLTYPE GetCurrentBackBufferIndex(void);
+	HRESULT STDMETHODCALLTYPE CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE ColorSpace, UINT *pColorSpaceSupport);
+	HRESULT STDMETHODCALLTYPE SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace);
+	HRESULT STDMETHODCALLTYPE ResizeBuffers1(UINT BufferCount, UINT Width, UINT Height,
+		DXGI_FORMAT Format, UINT SwapChainFlags, const UINT *pCreationNodeMask,
+		IUnknown *const *ppPresentQueue);
 };
 
 

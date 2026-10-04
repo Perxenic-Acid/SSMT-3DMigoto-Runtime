@@ -4614,6 +4614,7 @@ void LoadConfigFile()
 	G->enable_check_interface = GetIniBool(L"System", L"allow_check_interface", false, NULL);
 	G->enable_create_device = GetIniInt(L"System", L"allow_create_device", 0, NULL);
 	G->enable_platform_update = GetIniBool(L"System", L"allow_platform_update", false, NULL);
+	G->skip_swapchain_wrap = GetIniBool(L"System", L"skip_swapchain_wrap", false, NULL);
 	// TODO: Enable this by default if wider testing goes well:
 	G->check_foreground_window = GetIniBool(L"System", L"check_foreground_window", false, NULL);
 

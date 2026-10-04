@@ -74,6 +74,214 @@
 
 #include "SSMTBridge.h"
 
+#include <mutex>
+#include <algorithm>
+#include <vector>
+
+
+// ReShade is deliberately hosted from the final GIMI Present path instead of
+// being injected as another graphics wrapper.  This keeps ownership of the
+// D3D11 device and swap chain with GIMI while still allowing ReShade to process
+// the fully-modified/upscaled back buffer immediately before it is presented.
+namespace
+{
+using ReShadeCreateEffectRuntimeFn = bool (*)(uint32_t api, void *opaque_device,
+	void *opaque_command_queue, void *opaque_swapchain, const char *config_path,
+	void **out_runtime);
+using ReShadeDestroyEffectRuntimeFn = void (*)(void *runtime);
+using ReShadeUpdateAndPresentEffectRuntimeFn = void (*)(void *runtime);
+
+constexpr uint32_t kReShadeD3D11Api = 0xb000;
+
+// ReShade normally records the active DXGI color space from its SetColorSpace1
+// hook under this private-data key. The hosted runtime intentionally disables
+// graphics hooks, so GIMI must provide the equivalent metadata itself.
+constexpr GUID kReShadeSwapChainColorSpaceKey =
+	{ 0x18b57e4, 0x1493, 0x4953, { 0xad, 0xf2, 0xde, 0x6d, 0x99, 0xcc, 0x5, 0xe5 } };
+
+static std::wstring GetEnvironmentValue(const wchar_t *name)
+{
+	const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
+	if (required == 0)
+		return std::wstring();
+
+	std::vector<wchar_t> value(required);
+	const DWORD copied = GetEnvironmentVariableW(name, value.data(), required);
+	if (copied == 0 || copied >= required)
+		return std::wstring();
+	return std::wstring(value.data(), copied);
+}
+
+static void GetHostedReShadeSettings(std::wstring &dll_path, std::wstring &config_path)
+{
+	dll_path = GetEnvironmentValue(L"GIMI_HOSTED_RESHADE_DLL");
+	config_path = GetEnvironmentValue(L"GIMI_HOSTED_RESHADE_CONFIG");
+}
+
+static bool HostedReShadeEnabled()
+{
+	static const bool enabled =
+		GetEnvironmentVariableW(L"GIMI_HOSTED_RESHADE_DLL", nullptr, 0) > 1 &&
+		GetEnvironmentVariableW(L"GIMI_HOSTED_RESHADE_CONFIG", nullptr, 0) > 1;
+	return enabled;
+}
+
+static std::string ToUtf8(const std::wstring &value)
+{
+	if (value.empty())
+		return std::string();
+	const int required = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1,
+		nullptr, 0, nullptr, nullptr);
+	if (required <= 1)
+		return std::string();
+	std::string result(static_cast<size_t>(required), '\0');
+	WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, &result[0], required,
+		nullptr, nullptr);
+	result.resize(static_cast<size_t>(required - 1));
+	return result;
+}
+
+class GimiHostedReShadeRuntime
+{
+public:
+	void Present(IDXGISwapChain1 *swap_chain, HackerContext *hacker_context)
+	{
+		if (swap_chain == nullptr || hacker_context == nullptr)
+			return;
+
+		std::lock_guard<std::mutex> lock(mMutex);
+		if (mSwapChain != nullptr && mSwapChain != swap_chain)
+			ResetLocked();
+		mSwapChain = swap_chain;
+
+		if (mRuntime == nullptr && !mInitializationFailed)
+			InitializeLocked(swap_chain, hacker_context);
+		if (mRuntime != nullptr && mUpdateAndPresent != nullptr)
+			mUpdateAndPresent(mRuntime);
+	}
+
+	void Reset()
+	{
+		std::lock_guard<std::mutex> lock(mMutex);
+		ResetLocked();
+	}
+
+private:
+	void InitializeLocked(IDXGISwapChain1 *swap_chain, HackerContext *hacker_context)
+	{
+		std::wstring dll_path;
+		std::wstring config_path;
+		GetHostedReShadeSettings(dll_path, config_path);
+		if (dll_path.empty() || config_path.empty())
+		{
+			mInitializationFailed = true;
+			LogInfo("GIMI hosted ReShade disabled: GIMI_HOSTED_RESHADE_DLL or "
+				"GIMI_HOSTED_RESHADE_CONFIG is not set\n");
+			return;
+		}
+
+		// The DLL must be loaded with its graphics hooks disabled.  Its public
+		// runtime API remains available, but it cannot replace GIMI's objects.
+		SetEnvironmentVariableW(L"RESHADE_DISABLE_GRAPHICS_HOOK", L"1");
+		mModule = LoadLibraryW(dll_path.c_str());
+		if (mModule == nullptr)
+		{
+			mInitializationFailed = true;
+			LogInfo("GIMI hosted ReShade failed to load %s (error %lu)\n",
+				ToUtf8(dll_path).c_str(), GetLastError());
+			return;
+		}
+
+		const auto create = reinterpret_cast<ReShadeCreateEffectRuntimeFn>(
+			GetProcAddress(mModule, "ReShadeCreateEffectRuntime"));
+		mDestroy = reinterpret_cast<ReShadeDestroyEffectRuntimeFn>(
+			GetProcAddress(mModule, "ReShadeDestroyEffectRuntime"));
+		mUpdateAndPresent = reinterpret_cast<ReShadeUpdateAndPresentEffectRuntimeFn>(
+			GetProcAddress(mModule, "ReShadeUpdateAndPresentEffectRuntime"));
+		if (create == nullptr || mDestroy == nullptr || mUpdateAndPresent == nullptr)
+		{
+			mInitializationFailed = true;
+			LogInfo("GIMI hosted ReShade exports are unavailable in %s\n",
+				ToUtf8(dll_path).c_str());
+			return;
+		}
+
+		// Get the device through the exact swap chain passed to ReShade.  The
+		// ReShade C API checks COM pointer identity and rejects a different view.
+		ID3D11Device *device = nullptr;
+		const HRESULT device_hr = swap_chain->GetDevice(IID_PPV_ARGS(&device));
+		if (FAILED(device_hr) || device == nullptr)
+		{
+			mInitializationFailed = true;
+			LogInfo("GIMI hosted ReShade could not get the swap-chain device: %x\n",
+				device_hr);
+			return;
+		}
+
+		ID3D11DeviceContext1 *context = hacker_context->GetPassThroughOrigContext1();
+
+		// Genshin's native HDR path uses an R10G10B10A2 swap chain and exposes
+		// IDXGISwapChain3 directly, so SetColorSpace1 bypasses this wrapper. Without
+		// ReShade's normal DXGI hook, its hosted runtime otherwise assumes sRGB and
+		// writes raw PQ values into an 8-bit SDR screenshot, producing a grey image.
+		// Mirror ReShade's hook metadata before creating the hosted runtime so it
+		// selects the tagged 16-bit HDR PNG path and compiles effects for HDR10/PQ.
+		DXGI_SWAP_CHAIN_DESC swap_desc = {};
+		if (SUCCEEDED(swap_chain->GetDesc(&swap_desc)) &&
+			swap_desc.BufferDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
+		{
+			const DXGI_COLOR_SPACE_TYPE color_space =
+				DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+			const HRESULT color_space_hr = swap_chain->SetPrivateData(
+				kReShadeSwapChainColorSpaceKey, sizeof(color_space), &color_space);
+			LogInfo("GIMI hosted ReShade HDR10/PQ metadata %s (%x)\n",
+				SUCCEEDED(color_space_hr) ? "installed" : "failed", color_space_hr);
+		}
+
+		std::string utf8_config = ToUtf8(config_path);
+		const bool created = create(kReShadeD3D11Api, device, context, swap_chain,
+			utf8_config.c_str(), &mRuntime);
+		device->Release();
+
+		if (!created || mRuntime == nullptr)
+		{
+			mRuntime = nullptr;
+			mInitializationFailed = true;
+			LogInfo("GIMI hosted ReShade runtime initialization failed for %s\n",
+				utf8_config.c_str());
+			return;
+		}
+
+		LogInfo("GIMI hosted ReShade runtime initialized on final GIMI Present path\n");
+	}
+
+	void ResetLocked()
+	{
+		if (mRuntime != nullptr && mDestroy != nullptr)
+			mDestroy(mRuntime);
+		mRuntime = nullptr;
+		mSwapChain = nullptr;
+		mInitializationFailed = false;
+	}
+
+	std::mutex mMutex;
+	HMODULE mModule = nullptr;
+	IDXGISwapChain1 *mSwapChain = nullptr;
+	void *mRuntime = nullptr;
+	ReShadeDestroyEffectRuntimeFn mDestroy = nullptr;
+	ReShadeUpdateAndPresentEffectRuntimeFn mUpdateAndPresent = nullptr;
+	bool mInitializationFailed = false;
+};
+
+GimiHostedReShadeRuntime gGimiHostedReShadeRuntime;
+
+std::mutex gFrameActionOwnerMutex;
+HackerSwapChain *gPreferredFrameActionOwner = nullptr; // Borrowed; protected by the mutex.
+std::vector<HackerSwapChain *> gPendingAuxiliarySwapChains;
+}
+
+
+
 
 // -----------------------------------------------------------------------------
 // SetWindowPos hook, activated by full_screen=2 in d3dx.ini
@@ -141,6 +349,13 @@ void InstallSetWindowPosHook()
 HackerSwapChain::HackerSwapChain(IDXGISwapChain1 *pSwapChain, HackerDevice *pDevice, HackerContext *pContext)
 {
 	mOrigSwapChain1 = pSwapChain;
+	mOrigSwapChain3 = nullptr;
+	if (HostedReShadeEnabled() &&
+		SUCCEEDED(pSwapChain->QueryInterface(__uuidof(IDXGISwapChain3),
+		reinterpret_cast<void **>(&mOrigSwapChain3)))) {
+		// mOrigSwapChain1 keeps the underlying COM object alive for this wrapper.
+		mOrigSwapChain3->Release();
+	}
 
 	mHackerDevice = pDevice;
 	mHackerContext = pContext;
@@ -181,6 +396,33 @@ HackerSwapChain::HackerSwapChain(IDXGISwapChain1 *pSwapChain, HackerDevice *pDev
 	catch (...) {
 		LogInfo("  *** Failed to create Overlay. Exception caught.\n");
 		mOverlay = NULL;
+	}
+}
+
+void HackerSwapChain::RegisterFrameActionOwner(bool device_was_wrapped)
+{
+	if (!HostedReShadeEnabled())
+		return;
+
+	std::lock_guard<std::mutex> lock(gFrameActionOwnerMutex);
+	if (device_was_wrapped) {
+		// 游戏交换链使用 GIMI 返回的 HackerDevice。显卡插层可能先用原生设备
+		// 创建辅助交换链；其 Present 触发的 Mod 资源重载仍须使用游戏设备。
+		gPreferredFrameActionOwner = this;
+		for (HackerSwapChain *auxiliary : gPendingAuxiliarySwapChains) {
+			AddRef();
+			auxiliary->mFrameActionOwner.store(this, std::memory_order_release);
+			LogInfo("SSMT frame actions: auxiliary %p uses game swap chain %p\n",
+				auxiliary, this);
+		}
+		gPendingAuxiliarySwapChains.clear();
+	} else if (gPreferredFrameActionOwner) {
+		gPreferredFrameActionOwner->AddRef();
+		mFrameActionOwner.store(gPreferredFrameActionOwner, std::memory_order_release);
+		LogInfo("SSMT frame actions: auxiliary %p uses game swap chain %p\n",
+			this, gPreferredFrameActionOwner);
+	} else {
+		gPendingAuxiliarySwapChains.push_back(this);
 	}
 }
 
@@ -347,6 +589,38 @@ STDMETHODIMP HackerSwapChain::QueryInterface(THIS_
 		return hr;
 	}
 
+	// A native v2/v3 pointer lets the caller bypass our Present frame actions.
+	// Hosted ReShade requires those actions for GIMI's delayed Mod load and NR.
+	if (HostedReShadeEnabled() && mOrigSwapChain3 &&
+		(riid == __uuidof(IDXGISwapChain2) || riid == __uuidof(IDXGISwapChain3)))
+	{
+		*ppvObject = static_cast<IDXGISwapChain3 *>(this);
+		LogInfo("  retaining hosted IDXGISwapChain2/3 wrapper %p\n", this);
+		return hr;
+	}
+
+	// Native HDR swap chains use IDXGISwapChain3/4 to negotiate the HDR
+	// color space (SetColorSpace1) and frame-latency state.  The old GIMI
+	// wrapper deliberately rejected these interfaces because returning the
+	// wrapper with a newer vtable was unsafe for some older games.  Returning
+	// E_NOINTERFACE here prevents Unity/Genshin from completing HDR setup and
+	// leaves a black back buffer.  For the R10G10B10A2 HDR path, expose the
+	// original interface pointer instead; calls that need the newer vtable
+	// then use the DXGI implementation with the correct ABI, while the
+	// IDXGISwapChain1 methods remain handled by this wrapper.
+	DXGI_SWAP_CHAIN_DESC current_desc = {};
+	const bool native_hdr_swap_chain =
+		SUCCEEDED(mOrigSwapChain1->GetDesc(&current_desc)) &&
+		current_desc.BufferDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM;
+	if (native_hdr_swap_chain &&
+		(riid == __uuidof(IDXGISwapChain2) ||
+		 riid == __uuidof(IDXGISwapChain3) ||
+		 riid == __uuidof(IDXGISwapChain4)))
+	{
+		LogInfo("  exposing native HDR %s interface %p\n", NameFromIID(riid).c_str(), *ppvObject);
+		return hr;
+	}
+
 	// For TheDivision, only upon Win10, it will request these.  Even though the object
 	// we would return is the exact same pointer in memory, it still calls into the object
 	// with a vtable entry that does not match what they expected. Somehow they decide
@@ -414,6 +688,20 @@ STDMETHODIMP_(ULONG) HackerSwapChain::Release(THIS)
 
 	if (ulRef <= 0)
 	{
+		HackerSwapChain *frame_owner = nullptr;
+		{
+			std::lock_guard<std::mutex> lock(gFrameActionOwnerMutex);
+			if (gPreferredFrameActionOwner == this)
+				gPreferredFrameActionOwner = nullptr;
+			auto it = std::find(gPendingAuxiliarySwapChains.begin(),
+				gPendingAuxiliarySwapChains.end(), this);
+			if (it != gPendingAuxiliarySwapChains.end())
+				gPendingAuxiliarySwapChains.erase(it);
+			frame_owner = mFrameActionOwner.exchange(nullptr, std::memory_order_acq_rel);
+		}
+		if (frame_owner)
+			frame_owner->Release();
+
 		if (mHackerDevice) {
 			if (mHackerDevice->GetHackerSwapChain() == this) {
 				LogInfo("  Clearing mHackerDevice->mHackerSwapChain\n");
@@ -545,7 +833,6 @@ STDMETHODIMP HackerSwapChain::Present(THIS_
 {
 	Profiling::State profiling_state = {0};
 	bool profiling = false;
-
 	LogDebug("HackerSwapChain::Present(%s@%p) called with\n", type_name(this), this);
 	LogDebug("  SyncInterval = %d\n", SyncInterval);
 	LogDebug("  Flags = %d\n", Flags);
@@ -582,7 +869,11 @@ STDMETHODIMP HackerSwapChain::Present(THIS_
 
 		// Every presented frame, we want to take some CPU time to run our actions,
 		// which enables hunting, and snapshots, and aiming overrides and other inputs
-		RunFrameActions();
+		HackerSwapChain *frame_owner = mFrameActionOwner.load(std::memory_order_acquire);
+		if (frame_owner)
+			frame_owner->RunFrameActions();
+		else
+			RunFrameActions();
 
 		SSMTBridge::NotifyPresent(
 			mHackerDevice,
@@ -591,6 +882,8 @@ STDMETHODIMP HackerSwapChain::Present(THIS_
 			SyncInterval,
 			Flags
 		);
+		if (HostedReShadeEnabled())
+			gGimiHostedReShadeRuntime.Present(mOrigSwapChain1, mHackerContext);
 
 		if (profiling)
 			Profiling::end(&profiling_state, &Profiling::present_overhead);
@@ -727,6 +1020,37 @@ STDMETHODIMP HackerSwapChain::ResizeBuffers(THIS_
 		G->mResolutionInfo.height = Height;
 		LogInfo("  Got resolution from swap chain: %ix%i\n",
 			G->mResolutionInfo.width, G->mResolutionInfo.height);
+	}
+
+	// ReShade caches views for the current back buffer. Tear down the hosted
+	// runtime before the game recreates those buffers, then reinitialize lazily.
+	if (HostedReShadeEnabled())
+		gGimiHostedReShadeRuntime.Reset();
+
+	// ReShade (and some other post-processing wrappers) may request an sRGB
+	// format while the game is using the HDR R10G10B10A2 swap chain. Passing
+	// that format through this wrapper makes DXGI reject the resize with
+	// E_INVALIDARG. DXGI_FORMAT_UNKNOWN means "keep the existing format" for
+	// ResizeBuffers, preserving the HDR swap-chain contract.
+	DXGI_SWAP_CHAIN_DESC current_desc = {};
+	if (SUCCEEDED(mOrigSwapChain1->GetDesc(&current_desc)) &&
+		current_desc.BufferDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
+	{
+		if (NewFormat != DXGI_FORMAT_UNKNOWN && NewFormat != current_desc.BufferDesc.Format)
+		{
+			LogInfo("  Preserving HDR swap-chain format %d instead of requested format %d\n",
+				static_cast<int>(current_desc.BufferDesc.Format), static_cast<int>(NewFormat));
+			NewFormat = DXGI_FORMAT_UNKNOWN;
+		}
+		// Flip-model HDR swap chains require at least two buffers. ReShade's
+		// resize path uses BufferCount=1, which is invalid for the original
+		// chain, so retain its existing count as well.
+		if (current_desc.BufferCount >= 2 && BufferCount != 0 && BufferCount < 2)
+		{
+			LogInfo("  Preserving HDR buffer count %u instead of requested count %u\n",
+				current_desc.BufferCount, BufferCount);
+			BufferCount = current_desc.BufferCount;
+		}
 	}
 
 	HRESULT hr = mOrigSwapChain1->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
@@ -893,7 +1217,11 @@ STDMETHODIMP HackerSwapChain::Present1(THIS_
 
 		// Every presented frame, we want to take some CPU time to run our actions,
 		// which enables hunting, and snapshots, and aiming overrides and other inputs
-		RunFrameActions();
+		HackerSwapChain *frame_owner = mFrameActionOwner.load(std::memory_order_acquire);
+		if (frame_owner)
+			frame_owner->RunFrameActions();
+		else
+			RunFrameActions();
 
 		SSMTBridge::NotifyPresent(
 			mHackerDevice,
@@ -902,6 +1230,8 @@ STDMETHODIMP HackerSwapChain::Present1(THIS_
 			SyncInterval,
 			PresentFlags
 		);
+		if (HostedReShadeEnabled())
+			gGimiHostedReShadeRuntime.Present(mOrigSwapChain1, mHackerContext);
 
 		if (profiling)
 			Profiling::end(&profiling_state, &Profiling::present_overhead);
@@ -988,6 +1318,73 @@ STDMETHODIMP HackerSwapChain::GetRotation(THIS_
 	HRESULT hr = mOrigSwapChain1->GetRotation(pRotation);
 	LogInfo("  returns result = %x\n", hr);
 	return hr;
+}
+
+STDMETHODIMP HackerSwapChain::SetSourceSize(UINT Width, UINT Height)
+{
+	return mOrigSwapChain3 ? mOrigSwapChain3->SetSourceSize(Width, Height) : E_NOINTERFACE;
+}
+
+STDMETHODIMP HackerSwapChain::GetSourceSize(UINT *pWidth, UINT *pHeight)
+{
+	return mOrigSwapChain3 ? mOrigSwapChain3->GetSourceSize(pWidth, pHeight) : E_NOINTERFACE;
+}
+
+STDMETHODIMP HackerSwapChain::SetMaximumFrameLatency(UINT MaxLatency)
+{
+	return mOrigSwapChain3 ? mOrigSwapChain3->SetMaximumFrameLatency(MaxLatency) : E_NOINTERFACE;
+}
+
+STDMETHODIMP HackerSwapChain::GetMaximumFrameLatency(UINT *pMaxLatency)
+{
+	return mOrigSwapChain3 ? mOrigSwapChain3->GetMaximumFrameLatency(pMaxLatency) : E_NOINTERFACE;
+}
+
+HANDLE STDMETHODCALLTYPE HackerSwapChain::GetFrameLatencyWaitableObject(void)
+{
+	return mOrigSwapChain3 ? mOrigSwapChain3->GetFrameLatencyWaitableObject() : nullptr;
+}
+
+STDMETHODIMP HackerSwapChain::SetMatrixTransform(const DXGI_MATRIX_3X2_F *pMatrix)
+{
+	return mOrigSwapChain3 ? mOrigSwapChain3->SetMatrixTransform(pMatrix) : E_NOINTERFACE;
+}
+
+STDMETHODIMP HackerSwapChain::GetMatrixTransform(DXGI_MATRIX_3X2_F *pMatrix)
+{
+	return mOrigSwapChain3 ? mOrigSwapChain3->GetMatrixTransform(pMatrix) : E_NOINTERFACE;
+}
+
+UINT STDMETHODCALLTYPE HackerSwapChain::GetCurrentBackBufferIndex(void)
+{
+	return mOrigSwapChain3 ? mOrigSwapChain3->GetCurrentBackBufferIndex() : 0;
+}
+
+STDMETHODIMP HackerSwapChain::CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE ColorSpace,
+	UINT *pColorSpaceSupport)
+{
+	return mOrigSwapChain3 ? mOrigSwapChain3->CheckColorSpaceSupport(ColorSpace, pColorSpaceSupport) : E_NOINTERFACE;
+}
+
+STDMETHODIMP HackerSwapChain::SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace)
+{
+	return mOrigSwapChain3 ? mOrigSwapChain3->SetColorSpace1(ColorSpace) : E_NOINTERFACE;
+}
+
+STDMETHODIMP HackerSwapChain::ResizeBuffers1(UINT BufferCount, UINT Width, UINT Height,
+	DXGI_FORMAT Format, UINT SwapChainFlags, const UINT *pCreationNodeMask,
+	IUnknown *const *ppPresentQueue)
+{
+	if (!mOrigSwapChain3)
+		return E_NOINTERFACE;
+	if (G->mResolutionInfo.from == GetResolutionFrom::SWAP_CHAIN) {
+		G->mResolutionInfo.width = Width;
+		G->mResolutionInfo.height = Height;
+	}
+	if (HostedReShadeEnabled())
+		gGimiHostedReShadeRuntime.Reset();
+	return mOrigSwapChain3->ResizeBuffers1(BufferCount, Width, Height, Format,
+		SwapChainFlags, pCreationNodeMask, ppPresentQueue);
 }
 
 // -----------------------------------------------------------------------------
@@ -1331,4 +1728,3 @@ STDMETHODIMP HackerUpscalingSwapChain::ResizeTarget(THIS_
 	LogInfo("  returns result = %x\n", hr);
 	return hr;
 }
-

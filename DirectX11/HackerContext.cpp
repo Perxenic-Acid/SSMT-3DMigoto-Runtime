@@ -1170,6 +1170,16 @@ HRESULT STDMETHODCALLTYPE HackerContext::QueryInterface(
 		return S_OK;
 	}
 
+	if (ppvObject && IsEqualIID(riid, IID_GimiPassThroughContext)) {
+		// mOrigContext1 is GIMI's trampoline object when vtable hooks are
+		// enabled. Calls through it go straight to the saved system D3D11
+		// functions and cannot recurse through HookedContext.cpp.
+		mOrigContext1->AddRef();
+		*ppvObject = mOrigContext1;
+		LogInfo("  return GIMI pass-through context %p for private interop\n", mOrigContext1);
+		return S_OK;
+	}
+
 	HRESULT hr = mOrigContext1->QueryInterface(riid, ppvObject);
 	if (FAILED(hr))
 	{

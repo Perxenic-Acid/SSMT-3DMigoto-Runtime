@@ -12,6 +12,12 @@
 DEFINE_GUID(IID_HackerDevice,
 0x83ffd841, 0xa5c9, 0x46f4, 0x81, 0x9, 0xbc, 0x25, 0x95, 0x58, 0xfe, 0xf4);
 
+// Private interop contract for components that need the original D3D11
+// device without bypassing GIMI for normal game rendering.
+// {DB17DC9A-5A5A-4AC7-A4CE-EF41F7C51D5C}
+DEFINE_GUID(IID_GimiPassThroughDevice,
+0xdb17dc9a, 0x5a5a, 0x4ac7, 0xa4, 0xce, 0xef, 0x41, 0xf7, 0xc5, 0x1d, 0x5c);
+
 // Forward declaration to allow circular reference between HackerContext and HackerDevice. 
 // We need this to allow each to reference the other as needed.
 

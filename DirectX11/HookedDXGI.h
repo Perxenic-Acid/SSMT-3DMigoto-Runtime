@@ -48,7 +48,8 @@ void override_swap_chain(DXGI_SWAP_CHAIN_DESC *pDesc, DXGI_SWAP_CHAIN_DESC *orig
 void wrap_swap_chain(HackerDevice *hackerDevice,
 		IDXGISwapChain **ppSwapChain,
 		DXGI_SWAP_CHAIN_DESC *overrideSwapChainDesc,
-		DXGI_SWAP_CHAIN_DESC *origSwapChainDesc);
+		DXGI_SWAP_CHAIN_DESC *origSwapChainDesc,
+		bool device_was_wrapped);
 
 // Called from HookedDXGI
 

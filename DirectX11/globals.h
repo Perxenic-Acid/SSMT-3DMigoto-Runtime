@@ -456,6 +456,9 @@ struct Globals
 	bool enable_check_interface;
 	int enable_create_device;
 	bool enable_platform_update;
+	// Leave DXGI swap-chain ownership to an external presentation layer
+	// (for example ReShade), while retaining GIMI's device/context hooks.
+	bool skip_swapchain_wrap;
 
 	int GAME_INTERNAL_WIDTH; // this variable stores the resolution width provided by the game (required for the upscaling feature)
 	int GAME_INTERNAL_HEIGHT; // this variable stores the resolution height provided by the game (required for the upscaling feature)
@@ -754,6 +757,7 @@ struct Globals
 		enable_check_interface(false),
 		enable_create_device(0),
 		enable_platform_update(false),
+		skip_swapchain_wrap(false),
 		gInitialized(false),
 		bIntendedTargetExe(false),
 		gReloadConfigPending(false),

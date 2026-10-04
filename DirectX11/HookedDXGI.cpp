@@ -128,13 +128,81 @@ static HackerDevice* prepare_devices_for_dx12_warning(IUnknown *unknown_device)
 
 #endif
 
+// Some proxy layers create their DXGI swap chain with the original D3D11
+// device, rather than the device object that was returned by
+// D3D11CreateDevice.  This is valid D3D11 behaviour, but it means the device
+// has not reached the usual wrapping path.  Register it here so the swap chain
+// can still be wrapped and GIMI retains its Present/mod hooks.
+static HackerDevice* wrap_untracked_d3d11_device(IUnknown *unknown_device)
+{
+	ID3D11Device1 *d3d11_device = NULL;
+	ID3D11DeviceContext1 *d3d11_context = NULL;
+	HackerDevice *device_wrap = NULL;
+	HackerContext *context_wrap = NULL;
+
+	if (FAILED(unknown_device->QueryInterface(IID_PPV_ARGS(&d3d11_device))))
+		return NULL;
+
+	d3d11_device->GetImmediateContext1(&d3d11_context);
+	if (!d3d11_context) {
+		LogInfo("Could not obtain ID3D11DeviceContext1 for untracked device %p\n", d3d11_device);
+		d3d11_device->Release();
+		return NULL;
+	}
+
+	device_wrap = new HackerDevice(d3d11_device, d3d11_context);
+	context_wrap = HackerContextFactory(d3d11_device, d3d11_context);
+	if (!context_wrap) {
+		LogInfo("Could not create HackerContext for untracked device %p\n", d3d11_device);
+		return device_wrap;
+	}
+
+	device_wrap->SetHackerContext(context_wrap);
+	context_wrap->SetHackerDevice(device_wrap);
+	// Keep the compatibility path equivalent to the normal
+	// D3D11CreateDevice wrapping path.  In recommended mode GIMI relies on
+	// device hooks to observe shader/resource creation; installing only the
+	// immediate-context hook leaves the swap chain wrapped while the actual
+	// rendering device bypasses mod tracking and shader reload bookkeeping.
+	if (G->enable_hooks & EnableHooks::DEVICE) {
+		device_wrap->HookDevice();
+		LogInfo("Compatibility: installed device hooks for untracked device %p\n", d3d11_device);
+	}
+	// This device was supplied to DXGI outside 3DMigoto's normal
+	// D3D11CreateDevice wrapping path. The game therefore keeps using its
+	// original immediate context, so the compatibility context must install
+	// the same vtable hook as the normal path when immediate-context hooks are
+	// enabled.
+	if (G->enable_hooks & EnableHooks::IMMEDIATE_CONTEXT)
+		context_wrap->HookContext();
+	d3d11_device->SetPrivateData(IID_HackerDevice, sizeof(HackerDevice*), &device_wrap);
+	device_wrap->Create3DMigotoResources();
+	context_wrap->Bind3DMigotoResources();
+	if (!G->constants_run)
+		context_wrap->InitIniParams();
+
+	LogInfo("Compatibility: registered untracked ID3D11Device %p as HackerDevice %p\n",
+		d3d11_device, device_wrap);
+	return device_wrap;
+}
+
 // Takes an IUnknown device and finds the corresponding HackerDevice and
 // DirectX device interfaces. The passed in IUnknown may be modified to point
 // to the real DirectX device so ensure that it will be safe to pass to the
 // original CreateSwapChain call.
-static HackerDevice* sort_out_swap_chain_device_mess(IUnknown **device)
+static HackerDevice* sort_out_swap_chain_device_mess(IUnknown **device, bool *was_wrapped)
 {
 	HackerDevice *hackerDevice;
+	if (was_wrapped) {
+		*was_wrapped = false;
+		HackerDevice *existing = nullptr;
+		if (device && *device &&
+			SUCCEEDED((*device)->QueryInterface(IID_HackerDevice,
+				reinterpret_cast<void **>(&existing)))) {
+			*was_wrapped = true;
+			existing->Release();
+		}
+	}
 
 	// pDevice could be one of several different things:
 	// - It could be a HackerDevice, if the game called CreateSwapChain()
@@ -170,16 +238,12 @@ static HackerDevice* sort_out_swap_chain_device_mess(IUnknown **device)
 		analyse_iunknown(*device);
 
 		if (check_interface_supported(*device, IID_ID3D11Device)) {
-			// If we do end up in another situation where we are
-			// seeing a device for the first time (like
-			// CreateDeviceAndSwapChain calling back into us), we
-			// could consider creating our HackerDevice here. But
-			// for now we aren't expecting this to happen, so treat
-			// it as fatal if it does.
-			//
-			// D3D11On12CreateDevice() could possibly lead us here,
-			// depending on how that works.
-			LogInfo("BUG: Unwrapped ID3D11Device!\n");
+			hackerDevice = wrap_untracked_d3d11_device(*device);
+			if (hackerDevice) {
+				*device = hackerDevice->GetPossiblyHookedOrigDevice1();
+				return hackerDevice;
+			}
+			LogInfo("BUG: Unwrapped ID3D11Device could not be wrapped!\n");
 			DoubleBeepExit();
 		}
 
@@ -434,7 +498,8 @@ static void override_factory2_swap_chain(
 void wrap_swap_chain(HackerDevice *hackerDevice,
 		IDXGISwapChain **ppSwapChain,
 		DXGI_SWAP_CHAIN_DESC *overrideSwapChainDesc,
-		DXGI_SWAP_CHAIN_DESC *origSwapChainDesc)
+		DXGI_SWAP_CHAIN_DESC *origSwapChainDesc,
+		bool device_was_wrapped)
 {
 	HackerContext *hackerContext = NULL;
 	HackerSwapChain *swapchainWrap = NULL;
@@ -477,6 +542,7 @@ void wrap_swap_chain(HackerDevice *hackerDevice,
 			origSwapChain->SetFullscreenState(TRUE, nullptr);
 		}
 	}
+	swapchainWrap->RegisterFrameActionOwner(device_was_wrapped);
 
 	// For 3DMigoto's crash handler emergency switch to windowed mode function:
 	if (overrideSwapChainDesc && !overrideSwapChainDesc->Windowed)
@@ -502,7 +568,8 @@ void wrap_swap_chain(HackerDevice *hackerDevice,
 
 static void wrap_factory2_swap_chain(
 		_In_ HackerDevice *hackerDevice,
-		_Out_ IDXGISwapChain1 **ppSwapChain)
+		_Out_ IDXGISwapChain1 **ppSwapChain,
+		bool device_was_wrapped)
 {
 	HackerContext *hackerContext = NULL;
 	HackerSwapChain *hackerSwapChain = NULL;
@@ -516,6 +583,7 @@ static void wrap_factory2_swap_chain(
 
 	// TODO: Upscaling
 	hackerSwapChain = new HackerSwapChain(origSwapChain, hackerDevice, hackerContext);
+	hackerSwapChain->RegisterFrameActionOwner(device_was_wrapped);
 
 	// When creating a new swapchain, we can assume this is the game creating
 	// the most important object, and return the wrapped swapchain to the game
@@ -580,6 +648,7 @@ HRESULT __stdcall Hooked_CreateSwapChainForHwnd(
 	}
 
 	HackerDevice *hackerDevice = NULL;
+	bool device_was_wrapped = false;
 	DXGI_SWAP_CHAIN_DESC1 descCopy = { 0 };
 	DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreenCopy = { 0 };
 
@@ -591,8 +660,18 @@ HRESULT __stdcall Hooked_CreateSwapChainForHwnd(
 
 	// Save window handle so we can translate mouse coordinates to the window:
 	G->hWnd = hWnd;
+	if (G->skip_swapchain_wrap) {
+		// ReShade owns the HDR presentation chain. Do not replace its device or
+		// swap chain here: GIMI's device/context hooks remain active for mods.
+		LogInfo("  ReShade compatibility: passing CreateSwapChainForHwnd through unwrapped\n");
+		get_tls()->hooking_quirk_protection = true;
+		HRESULT hr = fnOrigCreateSwapChainForHwnd(This, pDevice, hWnd, pDesc,
+			pFullscreenDesc, pRestrictToOutput, ppSwapChain);
+		get_tls()->hooking_quirk_protection = false;
+		return hr;
+	}
 
-	hackerDevice = sort_out_swap_chain_device_mess(&pDevice);
+	hackerDevice = sort_out_swap_chain_device_mess(&pDevice, &device_was_wrapped);
 
 	// The game may pass in NULL for pFullscreenDesc, but we may still want
 	// to override it. To keep things simpler we always use our own full
@@ -613,7 +692,7 @@ HRESULT __stdcall Hooked_CreateSwapChainForHwnd(
 		goto out_release;
 	}
 
-	wrap_factory2_swap_chain(hackerDevice, ppSwapChain);
+	wrap_factory2_swap_chain(hackerDevice, ppSwapChain, device_was_wrapped);
 
 	LogInfo("->return result %#x\n", hr);
 out_release:
@@ -657,6 +736,7 @@ HRESULT __stdcall Hooked_CreateSwapChainForCoreWindow(
 	}
 
 	HackerDevice *hackerDevice = NULL;
+	bool device_was_wrapped = false;
 	DXGI_SWAP_CHAIN_DESC1 descCopy = { 0 };
 
 	LogInfo("*** Hooked IDXGIFactory2::CreateSwapChainForCoreWindow(%p) called\n", This);
@@ -665,8 +745,16 @@ HRESULT __stdcall Hooked_CreateSwapChainForCoreWindow(
 	LogInfo("  Description1 = %p\n", pDesc);
 
 	// FIXME: Need the hWnd for mouse support
+	if (G->skip_swapchain_wrap) {
+		LogInfo("  ReShade compatibility: passing CreateSwapChainForCoreWindow through unwrapped\n");
+		get_tls()->hooking_quirk_protection = true;
+		HRESULT hr = fnOrigCreateSwapChainForCoreWindow(This, pDevice, pWindow, pDesc,
+			pRestrictToOutput, ppSwapChain);
+		get_tls()->hooking_quirk_protection = false;
+		return hr;
+	}
 
-	hackerDevice = sort_out_swap_chain_device_mess(&pDevice);
+	hackerDevice = sort_out_swap_chain_device_mess(&pDevice, &device_was_wrapped);
 
 	override_factory2_swap_chain(&pDesc, &descCopy, NULL);
 
@@ -679,7 +767,7 @@ HRESULT __stdcall Hooked_CreateSwapChainForCoreWindow(
 		goto out_release;
 	}
 
-	wrap_factory2_swap_chain(hackerDevice, ppSwapChain);
+	wrap_factory2_swap_chain(hackerDevice, ppSwapChain, device_was_wrapped);
 
 	LogInfo("->return result %#x\n", hr);
 out_release:
@@ -721,6 +809,7 @@ HRESULT __stdcall Hooked_CreateSwapChainForComposition(
 	}
 
 	HackerDevice *hackerDevice = NULL;
+	bool device_was_wrapped = false;
 	DXGI_SWAP_CHAIN_DESC1 descCopy = { 0 };
 
 	LogInfo("*** Hooked IDXGIFactory2::CreateSwapChainForComposition(%p) called\n", This);
@@ -729,8 +818,16 @@ HRESULT __stdcall Hooked_CreateSwapChainForComposition(
 	LogInfo("  Description1 = %p\n", pDesc);
 
 	// FIXME: Need the hWnd for mouse support
+	if (G->skip_swapchain_wrap) {
+		LogInfo("  ReShade compatibility: passing CreateSwapChainForComposition through unwrapped\n");
+		get_tls()->hooking_quirk_protection = true;
+		HRESULT hr = fnOrigCreateSwapChainForComposition(This, pDevice, pDesc,
+			pRestrictToOutput, ppSwapChain);
+		get_tls()->hooking_quirk_protection = false;
+		return hr;
+	}
 
-	hackerDevice = sort_out_swap_chain_device_mess(&pDevice);
+	hackerDevice = sort_out_swap_chain_device_mess(&pDevice, &device_was_wrapped);
 
 	override_factory2_swap_chain(&pDesc, &descCopy, NULL);
 
@@ -743,7 +840,7 @@ HRESULT __stdcall Hooked_CreateSwapChainForComposition(
 		goto out_release;
 	}
 
-	wrap_factory2_swap_chain(hackerDevice, ppSwapChain);
+	wrap_factory2_swap_chain(hackerDevice, ppSwapChain, device_was_wrapped);
 
 	LogInfo("->return result %#x\n", hr);
 out_release:
@@ -862,11 +959,20 @@ HRESULT __stdcall Hooked_CreateSwapChain(
 	LogInfo("  Device = %p\n", pDevice);
 	LogInfo("  SwapChain = %p\n", ppSwapChain);
 	LogInfo("  Description = %p\n", pDesc);
+	if (G->skip_swapchain_wrap) {
+		// Keep the original DXGI object graph intact for ReShade's hook chain.
+		LogInfo("  ReShade compatibility: passing CreateSwapChain through unwrapped\n");
+		get_tls()->hooking_quirk_protection = true;
+		HRESULT hr = fnOrigCreateSwapChain(This, pDevice, pDesc, ppSwapChain);
+		get_tls()->hooking_quirk_protection = false;
+		return hr;
+	}
 
 	HackerDevice *hackerDevice = NULL;
+	bool device_was_wrapped = false;
 	DXGI_SWAP_CHAIN_DESC origSwapChainDesc;
 
-	hackerDevice = sort_out_swap_chain_device_mess(&pDevice);
+	hackerDevice = sort_out_swap_chain_device_mess(&pDevice, &device_was_wrapped);
 
 	override_swap_chain(pDesc, &origSwapChainDesc);
 
@@ -883,7 +989,8 @@ HRESULT __stdcall Hooked_CreateSwapChain(
 	LogInfo("  CreateSwapChain returned handle = %p\n", retChain);
 	analyse_iunknown(retChain);
 
-	wrap_swap_chain(hackerDevice, ppSwapChain, pDesc, &origSwapChainDesc);
+	wrap_swap_chain(hackerDevice, ppSwapChain, pDesc, &origSwapChainDesc,
+		device_was_wrapped);
 
 	LogInfo("->IDXGIFactory::CreateSwapChain return result %#x\n\n", hr);
 out_release:

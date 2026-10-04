@@ -1595,6 +1595,16 @@ HRESULT STDMETHODCALLTYPE HackerDevice::QueryInterface(
 		return S_OK;
 	}
 
+	if (ppvObject && IsEqualIID(riid, IID_GimiPassThroughDevice)) {
+		// OptiScaler's private D3D11-on-D3D12 bridge must initialise native
+		// NGX and create shared resources with the original device. Returning
+		// it through a dedicated IID keeps the game's ordinary calls on GIMI.
+		mOrigDevice1->AddRef();
+		*ppvObject = mOrigDevice1;
+		LogInfo("  return GIMI pass-through device %p for private interop\n", mOrigDevice1);
+		return S_OK;
+	}
+
 	HRESULT hr = mOrigDevice1->QueryInterface(riid, ppvObject);
 	if (FAILED(hr))
 	{

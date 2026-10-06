@@ -350,8 +350,7 @@ HackerSwapChain::HackerSwapChain(IDXGISwapChain1 *pSwapChain, HackerDevice *pDev
 {
 	mOrigSwapChain1 = pSwapChain;
 	mOrigSwapChain3 = nullptr;
-	if (HostedReShadeEnabled() &&
-		SUCCEEDED(pSwapChain->QueryInterface(__uuidof(IDXGISwapChain3),
+	if (SUCCEEDED(pSwapChain->QueryInterface(__uuidof(IDXGISwapChain3),
 		reinterpret_cast<void **>(&mOrigSwapChain3)))) {
 		// mOrigSwapChain1 keeps the underlying COM object alive for this wrapper.
 		mOrigSwapChain3->Release();
@@ -401,13 +400,10 @@ HackerSwapChain::HackerSwapChain(IDXGISwapChain1 *pSwapChain, HackerDevice *pDev
 
 void HackerSwapChain::RegisterFrameActionOwner(bool device_was_wrapped)
 {
-	if (!HostedReShadeEnabled())
-		return;
-
 	std::lock_guard<std::mutex> lock(gFrameActionOwnerMutex);
 	if (device_was_wrapped) {
-		// 游戏交换链使用 GIMI 返回的 HackerDevice。显卡插层可能先用原生设备
-		// 创建辅助交换链；其 Present 触发的 Mod 资源重载仍须使用游戏设备。
+		// 无托管 ReShade 时显卡插层也可能在辅助设备 Present。
+		// 帧动作必须使用游戏设备，否则 Mod 资源会建在辅助设备上。
 		gPreferredFrameActionOwner = this;
 		for (HackerSwapChain *auxiliary : gPendingAuxiliarySwapChains) {
 			AddRef();
@@ -514,14 +510,6 @@ void HackerSwapChain::RunFrameActions()
 		}
 	}
 
-	// Draw the on-screen overlay text with hunting and informational
-	// messages, before final Present. We now do this after the shader and
-	// config reloads, so if they have any notices we will see them this
-	// frame (just in case we crash next frame or something).
-	if (mOverlay && !G->suppress_overlay)
-		mOverlay->DrawOverlay();
-	G->suppress_overlay = false;
-
 	// This must happen on the same side of the config and shader reloads
 	// to ensure the config reload can't clear messages from the shader
 	// reload. It doesn't really matter which side we do it on at the
@@ -554,6 +542,15 @@ void HackerSwapChain::RunFrameActions()
 		TimeoutHuntingBuffers();
 		LeaveCriticalSection(&G->mCriticalSection);
 	}
+}
+
+void HackerSwapChain::DrawFrameOverlay()
+{
+	// 帧动作使用游戏设备，但显卡插层可能在辅助交换链 Present。
+	// 覆盖层应绘制到本次实际 Present 的交换链。
+	if (mOverlay && !G->suppress_overlay)
+		mOverlay->DrawOverlay();
+	G->suppress_overlay = false;
 }
 
 
@@ -589,13 +586,14 @@ STDMETHODIMP HackerSwapChain::QueryInterface(THIS_
 		return hr;
 	}
 
-	// A native v2/v3 pointer lets the caller bypass our Present frame actions.
-	// Hosted ReShade requires those actions for GIMI's delayed Mod load and NR.
-	if (HostedReShadeEnabled() && mOrigSwapChain3 &&
-		(riid == __uuidof(IDXGISwapChain2) || riid == __uuidof(IDXGISwapChain3)))
+	// 返回原生 v3 接口会绕过帧动作，使延迟加载的 Core/Mod 和输入失效。
+	// v2 保留原有兼容条件，避免改变其他游戏的原生渲染链。
+	if (mOrigSwapChain3 &&
+		(riid == __uuidof(IDXGISwapChain3) ||
+		 (HostedReShadeEnabled() && riid == __uuidof(IDXGISwapChain2))))
 	{
 		*ppvObject = static_cast<IDXGISwapChain3 *>(this);
-		LogInfo("  retaining hosted IDXGISwapChain2/3 wrapper %p\n", this);
+		LogInfo("  retaining IDXGISwapChain2/3 wrapper %p\n", this);
 		return hr;
 	}
 
@@ -874,6 +872,7 @@ STDMETHODIMP HackerSwapChain::Present(THIS_
 			frame_owner->RunFrameActions();
 		else
 			RunFrameActions();
+		DrawFrameOverlay();
 
 		SSMTBridge::NotifyPresent(
 			mHackerDevice,
@@ -1222,6 +1221,7 @@ STDMETHODIMP HackerSwapChain::Present1(THIS_
 			frame_owner->RunFrameActions();
 		else
 			RunFrameActions();
+		DrawFrameOverlay();
 
 		SSMTBridge::NotifyPresent(
 			mHackerDevice,

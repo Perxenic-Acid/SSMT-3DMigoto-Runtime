@@ -37,6 +37,7 @@ public:
 	
 	IDXGISwapChain1* GetOrigSwapChain1();
 	void RunFrameActions();
+	void DrawFrameOverlay();
 	void RegisterFrameActionOwner(bool device_was_wrapped);
 	Overlay *mOverlay;
 

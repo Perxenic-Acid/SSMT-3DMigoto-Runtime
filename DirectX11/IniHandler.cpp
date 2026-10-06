@@ -2063,22 +2063,49 @@ static CustomResource* ParseResourceSection(const wchar_t* section_name, const w
 		// first, then try relative to the 3DMigoto directory:
 		wstring namespace_path;
 		get_namespaced_section_path(section_name, &namespace_path);
-		bool found = false;
-		wchar_t path[MAX_PATH];
-		if (!namespace_path.empty()) {
-			GetModuleFileName(migoto_handle, path, MAX_PATH);
-			wcsrchr(path, L'\\')[1] = 0;
-			wcscat(path, namespace_path.c_str());
-			wcscat(path, setting);
-			if (GetFileAttributes(path) != INVALID_FILE_ATTRIBUTES)
-				found = true;
+		vector<wchar_t> module_path(MAX_PATH);
+		DWORD module_length = 0;
+		for (;;) {
+			module_length = GetModuleFileNameW(migoto_handle, module_path.data(),
+				static_cast<DWORD>(module_path.size()));
+			if (module_length == 0 || module_length < module_path.size() || module_path.size() >= 32768)
+				break;
+			module_path.resize(module_path.size() * 2 > 32768 ? 32768 : module_path.size() * 2);
 		}
-		if (!found) {
-			GetModuleFileName(migoto_handle, path, MAX_PATH);
-			wcsrchr(path, L'\\')[1] = 0;
-			wcscat(path, setting);
+		wstring base_path(module_path.data(), module_length);
+		const size_t last_separator = base_path.find_last_of(L'\\');
+		if (module_length == 0 || module_length >= module_path.size() || last_separator == wstring::npos) {
+			IniWarningW(L"Cannot resolve resource path\n - [%ls]\n", section_name);
+		} else {
+			base_path.resize(last_separator + 1);
+			auto resource_path = [&base_path](const wstring &relative) {
+				wstring path = base_path + relative;
+				// 添加长路径前缀前先规范化路径，去掉相对路径中的 .\\。
+				const DWORD required = GetFullPathNameW(path.c_str(), 0, nullptr, nullptr);
+				if (required) {
+					vector<wchar_t> normalized(required);
+					const DWORD copied = GetFullPathNameW(path.c_str(), required, normalized.data(), nullptr);
+					if (copied && copied < required)
+						path.assign(normalized.data(), copied);
+				}
+				if (path.length() >= MAX_PATH && path.compare(0, 4, L"\\\\?\\") != 0) {
+					if (path.compare(0, 2, L"\\\\") == 0)
+						path = L"\\\\?\\UNC\\" + path.substr(2);
+					else
+						path = L"\\\\?\\" + path;
+				}
+				return path;
+			};
+			wstring path;
+			if (!namespace_path.empty()) {
+				path = resource_path(namespace_path + setting);
+				if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+					path.clear();
+			}
+			if (path.empty())
+				path = resource_path(setting);
+			custom_resource->filename = path;
 		}
-		custom_resource->filename = path;
 	}
 
 	custom_resource->override_type = GetIniEnumClass(section_name, L"type", CustomResourceType::INVALID, NULL, CustomResourceTypeNames);

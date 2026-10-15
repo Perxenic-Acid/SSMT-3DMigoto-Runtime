@@ -34,6 +34,7 @@ static unordered_map<ID3D11CommandList*, FrameAnalysisDeferredTex2DPtr> frame_an
 FrameAnalysisContext::FrameAnalysisContext(ID3D11Device1 *pDevice, ID3D11DeviceContext1 *pContext) :
 	HackerContext(pDevice, pContext)
 {
+	mFrameAnalysisContext = this;
 	analyse_options = FrameAnalysisOptions::INVALID;
 	oneshot_analyse_options = FrameAnalysisOptions::INVALID;
 	oneshot_valid = false;

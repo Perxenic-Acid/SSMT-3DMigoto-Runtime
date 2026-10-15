@@ -25,6 +25,7 @@ DEFINE_GUID(IID_GimiPassThroughContext,
 
 // Self forward reference for the factory interface.
 class HackerContext;
+class FrameAnalysisContext;
 
 HackerContext* HackerContextFactory(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pContext1);
 
@@ -225,6 +226,10 @@ private:
 	void SetShaderResources(UINT StartSlot, UINT NumViews, ID3D11ShaderResourceView *const *ppShaderResourceViews);
 
 protected:
+	// Bridge 等组件会按 COM 接口长度复制虚表，不会保留 Runtime 私有尾部。
+	// 帧分析的内部派发必须通过对象成员，不能在 COM 虚表追加方法。
+	FrameAnalysisContext *mFrameAnalysisContext = nullptr;
+
 	// Allow FrameAnalysisContext access to these as an interim measure
 	// until it has been further decoupled from HackerContext. Be wary of
 	// relying on these - they will be zero in release mode with no
@@ -249,10 +254,10 @@ public:
 	void HookContext();
 
 	// public to allow CommandList access
-	virtual void FrameAnalysisLog(char *fmt, ...) {};
-	virtual void FrameAnalysisTrigger(FrameAnalysisOptions new_options) {};
-	virtual void FrameAnalysisDump(ID3D11Resource *resource, FrameAnalysisOptions options,
-		const wchar_t *target, DXGI_FORMAT format, UINT stride, UINT offset) {};
+	void FrameAnalysisLog(char *fmt, ...);
+	void FrameAnalysisTrigger(FrameAnalysisOptions new_options);
+	void FrameAnalysisDump(ID3D11Resource *resource, FrameAnalysisOptions options,
+		const wchar_t *target, DXGI_FORMAT format, UINT stride, UINT offset);
 
 	unsigned GetDrawNumber() const { return draw_number; };
 	unsigned GetDispatchNumber() const { return dispatch_number; };

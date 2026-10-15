@@ -222,7 +222,7 @@ public:
 	~FrameAnalysisContext();
 
 	// public to allow CommandList access
-	void FrameAnalysisLog(char *fmt, ...) override;
+	void FrameAnalysisLog(char *fmt, ...);
 	void FrameAnalysisLogW(wchar_t* fmt, ...);
 	void vFrameAnalysisLog(char *fmt, va_list ap);
 	void vFrameAnalysisLogW(wchar_t* fmt, va_list ap);
@@ -232,9 +232,9 @@ public:
 	// insert a newline:
 #define FrameAnalysisLogNoNL FrameAnalysisLog
 
-	void FrameAnalysisTrigger(FrameAnalysisOptions new_options) override;
+	void FrameAnalysisTrigger(FrameAnalysisOptions new_options);
 	void FrameAnalysisDump(ID3D11Resource *resource, FrameAnalysisOptions options,
-		const wchar_t *target, DXGI_FORMAT format, UINT stride, UINT offset) override;
+		const wchar_t *target, DXGI_FORMAT format, UINT stride, UINT offset);
 
 	/*** IUnknown methods ***/
 

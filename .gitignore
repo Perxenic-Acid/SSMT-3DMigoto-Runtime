@@ -213,3 +213,4 @@ $RECYCLE.BIN/
 
 # DXGI 共存测试的本机构建产物
 /tests/dxgi-interop/build/
+/tests/context-interop/build/

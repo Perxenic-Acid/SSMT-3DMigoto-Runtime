@@ -63,6 +63,29 @@ HackerContext* HackerContextFactory(ID3D11Device1 *pDevice1, ID3D11DeviceContext
 	return new HackerContext(pDevice1, pContext1);
 }
 
+void HackerContext::FrameAnalysisLog(char *fmt, ...)
+{
+	if (!mFrameAnalysisContext)
+		return;
+	va_list ap;
+	va_start(ap, fmt);
+	mFrameAnalysisContext->vFrameAnalysisLog(fmt, ap);
+	va_end(ap);
+}
+
+void HackerContext::FrameAnalysisTrigger(FrameAnalysisOptions new_options)
+{
+	if (mFrameAnalysisContext)
+		mFrameAnalysisContext->FrameAnalysisTrigger(new_options);
+}
+
+void HackerContext::FrameAnalysisDump(ID3D11Resource *resource, FrameAnalysisOptions options,
+	const wchar_t *target, DXGI_FORMAT format, UINT stride, UINT offset)
+{
+	if (mFrameAnalysisContext)
+		mFrameAnalysisContext->FrameAnalysisDump(resource, options, target, format, stride, offset);
+}
+
 HackerContext::HackerContext(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pContext1)
 {
 	mOrigDevice1 = pDevice1;

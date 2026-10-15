@@ -1,4 +1,4 @@
-// Object			OS				DXGI version	Feature level
+﻿// Object			OS				DXGI version	Feature level
 // IDXGIDevice		Win7			1.0				11.0
 // IDXGIDevice1		Win7			1.0				11.0
 // IDXGIDevice2		Platform update	1.2				11.1

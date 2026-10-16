@@ -816,6 +816,11 @@ STDMETHODIMP HackerSwapChain::GetDevice(
 {
 	LogDebug("HackerSwapChain::GetDevice(%s@%p) called with IID: %s\n", type_name(this), this, NameFromIID(riid).c_str());
 
+	// 交换链属于包装设备。返回底层设备会让 Unity 重新取得未包装的 Context，
+	// 之后的 Draw / 资源创建绕开 Mod，即使 Runtime DLL 和 Present 已经加载。
+	if (mHackerDevice)
+		return mHackerDevice->QueryInterface(riid, ppDevice);
+
 	HRESULT hr = mOrigSwapChain1->GetDevice(riid, ppDevice);
 	LogDebug("  returns result = %x, handle = %p\n", hr, *ppDevice);
 	return hr;

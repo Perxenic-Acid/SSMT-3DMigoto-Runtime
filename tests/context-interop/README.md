@@ -14,7 +14,7 @@ ctest --test-dir tests/context-interop/build -C Release --output-on-failure
 
 夹具也可手动加载附加 DLL（参数按顺序追加），设置 `SSMT_CONTEXT_TEST_HARDWARE=1` 可改用硬件设备。使用与实际组件匹配的隔离配置，DLL 及日志应位于测试目录。真实 ReShade + Bridge 在旧 Runtime 下同样崩溃，新版本可完成接口调用。Bridge + OptiScaler 的独立夹具路径未能查询到待测 Runtime 的私有 Context 身份，退出 7；这不能作为 Runtime 共存通过的证据，更不能据此判断游戏内 NR 成功或失败。
 
-测试同时检查退出码与完成标记，并校验返回对象的 Runtime 身份，防止只加载 DLL、绕过 Runtime 或提前退出被误报成功。WARP 回归和硬件接口测试均不能替代原神的 FSR2 dispatch、NR Feature 18 成功帧与 Mod 画面验收。
+测试同时检查退出码与完成标记，并校验返回对象的 Runtime 身份，防止只加载 DLL、绕过 Runtime 或提前退出被误报成功。交换链检查还创建隐藏 WARP 窗口，要求 `IDXGISwapChain4` 与继承的 `IUnknown` 保持同一身份，并通过包装器调用 `SetHDRMetaData` 和 `Present(TEST)`。WARP 回归和硬件接口测试均不能替代原神的 FSR2 dispatch、NR Feature 18 成功帧与 Mod 画面验收。
 
 2026-10-16 另修复 `HackerSwapChain::GetDevice` 返回底层设备的问题：交换链持有的 `HackerDevice` 已有引用，取回设备时使用它的 `QueryInterface`，由现有包装 / Hook 策略决定接口身份并增加调用方引用。否则客户端重新取得的 Context 会绕过替换命令，尽管原始创建入口和 Present 仍经过 Runtime。
 

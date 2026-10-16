@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <d3d11_1.h>
+#include <dxgi1_5.h>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +13,70 @@ static LONG WINAPI crash(EXCEPTION_POINTERS* info)
     std::fflush(stdout);
     ExitProcess(10);
     return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static bool test_swap_chain_interfaces(ID3D11Device* device)
+{
+    wchar_t class_name[64]{};
+    swprintf_s(class_name, L"SSMTContextInterop-%lu", GetCurrentProcessId());
+    WNDCLASSW window_class{};
+    window_class.lpfnWndProc = DefWindowProcW;
+    window_class.hInstance = GetModuleHandleW(nullptr);
+    window_class.lpszClassName = class_name;
+    if (!RegisterClassW(&window_class)) return false;
+
+    HWND window = CreateWindowExW(0, class_name, L"", WS_POPUP,
+        0, 0, 4, 4, nullptr, nullptr, window_class.hInstance, nullptr);
+    IDXGIDevice* dxgi_device = nullptr;
+    IDXGIAdapter* adapter = nullptr;
+    IDXGIFactory2* factory = nullptr;
+    IDXGISwapChain1* swap_chain = nullptr;
+    IDXGISwapChain3* swap_chain3 = nullptr;
+    IDXGISwapChain4* swap_chain4 = nullptr;
+    IUnknown* base_identity = nullptr;
+    IUnknown* v4_identity = nullptr;
+    HRESULT hr = window ? device->QueryInterface(IID_PPV_ARGS(&dxgi_device)) : E_FAIL;
+    if (SUCCEEDED(hr)) hr = dxgi_device->GetAdapter(&adapter);
+    if (SUCCEEDED(hr)) hr = adapter->GetParent(IID_PPV_ARGS(&factory));
+
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    desc.Width = 4;
+    desc.Height = 4;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    if (SUCCEEDED(hr)) hr = factory->CreateSwapChainForHwnd(device, window, &desc,
+        nullptr, nullptr, &swap_chain);
+    if (SUCCEEDED(hr)) hr = swap_chain->QueryInterface(IID_PPV_ARGS(&swap_chain4));
+    if (SUCCEEDED(hr)) hr = swap_chain->QueryInterface(IID_PPV_ARGS(&swap_chain3));
+    if (SUCCEEDED(hr)) hr = swap_chain->QueryInterface(IID_PPV_ARGS(&base_identity));
+    if (SUCCEEDED(hr)) hr = swap_chain4->QueryInterface(IID_PPV_ARGS(&v4_identity));
+
+    const bool same_identity = SUCCEEDED(hr) && base_identity == v4_identity;
+    HRESULT metadata_hr = E_FAIL;
+    HRESULT present_hr = E_FAIL;
+    if (same_identity) {
+        metadata_hr = swap_chain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+        present_hr = swap_chain4->Present(0, DXGI_PRESENT_TEST);
+    }
+    std::printf("SwapChain4=%08lx same_identity=%d metadata=%08lx Present(TEST)=%08lx\n",
+        hr, same_identity, metadata_hr, present_hr);
+
+    if (v4_identity) v4_identity->Release();
+    if (base_identity) base_identity->Release();
+    if (swap_chain4) swap_chain4->Release();
+    if (swap_chain3) swap_chain3->Release();
+    if (swap_chain) swap_chain->Release();
+    if (factory) factory->Release();
+    if (adapter) adapter->Release();
+    if (dxgi_device) dxgi_device->Release();
+    if (window) DestroyWindow(window);
+    UnregisterClassW(class_name, window_class.hInstance);
+    return same_identity && SUCCEEDED(present_hr);
 }
 
 int wmain(int argc, wchar_t** argv)
@@ -84,13 +149,15 @@ int wmain(int argc, wchar_t** argv)
     texture->Release();
     context->ClearState();
     context->Flush();
+    const bool swap_chain_ok = test_swap_chain_interfaces(device);
     if (shadow) {
         *reinterpret_cast<void***>(context) = original;
         VirtualFree(shadow, 0, MEM_RELEASE);
     }
     context->Release();
     device->Release();
-    std::printf("context calls completed\n");
+    std::printf("context calls completed; swap-chain interfaces %s\n",
+        swap_chain_ok ? "passed" : "failed");
     std::fflush(stdout);
-    return 0;
+    return swap_chain_ok ? 0 : 11;
 }

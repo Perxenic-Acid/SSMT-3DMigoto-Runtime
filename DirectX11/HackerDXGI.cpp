@@ -350,10 +350,16 @@ HackerSwapChain::HackerSwapChain(IDXGISwapChain1 *pSwapChain, HackerDevice *pDev
 {
 	mOrigSwapChain1 = pSwapChain;
 	mOrigSwapChain3 = nullptr;
+	mOrigSwapChain4 = nullptr;
 	if (SUCCEEDED(pSwapChain->QueryInterface(__uuidof(IDXGISwapChain3),
 		reinterpret_cast<void **>(&mOrigSwapChain3)))) {
 		// mOrigSwapChain1 keeps the underlying COM object alive for this wrapper.
 		mOrigSwapChain3->Release();
+	}
+	if (SUCCEEDED(pSwapChain->QueryInterface(__uuidof(IDXGISwapChain4),
+		reinterpret_cast<void **>(&mOrigSwapChain4)))) {
+		// mOrigSwapChain1 keeps the underlying COM object alive for this wrapper.
+		mOrigSwapChain4->Release();
 	}
 
 	mHackerDevice = pDevice;
@@ -596,24 +602,25 @@ STDMETHODIMP HackerSwapChain::QueryInterface(THIS_
 		LogInfo("  retaining IDXGISwapChain2/3 wrapper %p\n", this);
 		return hr;
 	}
+	if (mOrigSwapChain4 && riid == __uuidof(IDXGISwapChain4))
+	{
+		// IDXGISwapChain4 extends v3 by one method. Keep the wrapper so calls
+		// through the inherited vtable still reach Present and frame actions.
+		*ppvObject = static_cast<IDXGISwapChain4 *>(this);
+		LogInfo("  retaining IDXGISwapChain4 wrapper %p\n", this);
+		return hr;
+	}
 
-	// Native HDR swap chains use IDXGISwapChain3/4 to negotiate the HDR
-	// color space (SetColorSpace1) and frame-latency state.  The old GIMI
-	// wrapper deliberately rejected these interfaces because returning the
-	// wrapper with a newer vtable was unsafe for some older games.  Returning
-	// E_NOINTERFACE here prevents Unity/Genshin from completing HDR setup and
-	// leaves a black back buffer.  For the R10G10B10A2 HDR path, expose the
-	// original interface pointer instead; calls that need the newer vtable
-	// then use the DXGI implementation with the correct ABI, while the
-	// IDXGISwapChain1 methods remain handled by this wrapper.
+	// Native HDR swap chains may still request v2 before the newer wrapper is
+	// accepted. Preserve the existing v2 compatibility escape hatch for the
+	// R10G10B10A2 path; v3/v4 are handled above by the wrapper and therefore
+	// keep Present and frame actions on the same object.
 	DXGI_SWAP_CHAIN_DESC current_desc = {};
 	const bool native_hdr_swap_chain =
 		SUCCEEDED(mOrigSwapChain1->GetDesc(&current_desc)) &&
 		current_desc.BufferDesc.Format == DXGI_FORMAT_R10G10B10A2_UNORM;
 	if (native_hdr_swap_chain &&
-		(riid == __uuidof(IDXGISwapChain2) ||
-		 riid == __uuidof(IDXGISwapChain3) ||
-		 riid == __uuidof(IDXGISwapChain4)))
+		(riid == __uuidof(IDXGISwapChain2)))
 	{
 		LogInfo("  exposing native HDR %s interface %p\n", NameFromIID(riid).c_str(), *ppvObject);
 		return hr;
@@ -642,13 +649,6 @@ STDMETHODIMP HackerSwapChain::QueryInterface(THIS_
 		LogInfo("  returns result = %x for %p\n", hr, ppvObject);
 		return hr;
 	}
-	if (riid == __uuidof(IDXGISwapChain4))
-	{
-		LogInfo("***  returns E_NOINTERFACE as error for IDXGISwapChain4.\n");
-		*ppvObject = NULL;
-		return E_NOINTERFACE;
-	}
-
 	IUnknown* unk_this;
 	HRESULT hr_this = mOrigSwapChain1->QueryInterface(__uuidof(IUnknown), (void**)&unk_this);
 
@@ -1390,6 +1390,12 @@ STDMETHODIMP HackerSwapChain::ResizeBuffers1(UINT BufferCount, UINT Width, UINT 
 		gGimiHostedReShadeRuntime.Reset();
 	return mOrigSwapChain3->ResizeBuffers1(BufferCount, Width, Height, Format,
 		SwapChainFlags, pCreationNodeMask, ppPresentQueue);
+}
+
+STDMETHODIMP HackerSwapChain::SetHDRMetaData(
+	DXGI_HDR_METADATA_TYPE Type, UINT Size, void *pMetaData)
+{
+	return mOrigSwapChain4 ? mOrigSwapChain4->SetHDRMetaData(Type, Size, pMetaData) : E_NOINTERFACE;
 }
 
 // -----------------------------------------------------------------------------

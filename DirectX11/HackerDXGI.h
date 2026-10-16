@@ -1,6 +1,6 @@
 #pragma once
 
-#include <dxgi1_4.h>
+#include <dxgi1_5.h>
 #include <atomic>
 
 #include "HackerDevice.h"
@@ -20,14 +20,16 @@ void InstallSetWindowPosHook();
 
 // -----------------------------------------------------------------------------
 // Hierarchy:
-//	HackerSwapChain -> IDXGISwapChain1 -> IDXGISwapChain -> IDXGIDeviceSubObject -> IDXGIObject -> IUnknown
+//	HackerSwapChain -> IDXGISwapChain4 -> IDXGISwapChain3 -> IDXGISwapChain2 -> IDXGISwapChain1
 
-class HackerSwapChain : public IDXGISwapChain3
+class HackerSwapChain : public IDXGISwapChain4
 {
 protected:
 	IDXGISwapChain1 *mOrigSwapChain1;
 	// Borrowed from the same COM object as mOrigSwapChain1; no extra reference.
 	IDXGISwapChain3 *mOrigSwapChain3;
+	// Borrowed from the same COM object as mOrigSwapChain1; no extra reference.
+	IDXGISwapChain4 *mOrigSwapChain4;
 	std::atomic<HackerSwapChain *> mFrameActionOwner{nullptr};
 	HackerDevice *mHackerDevice;
 	HackerContext *mHackerContext;
@@ -206,6 +208,10 @@ public:
 	HRESULT STDMETHODCALLTYPE ResizeBuffers1(UINT BufferCount, UINT Width, UINT Height,
 		DXGI_FORMAT Format, UINT SwapChainFlags, const UINT *pCreationNodeMask,
 		IUnknown *const *ppPresentQueue);
+	HRESULT STDMETHODCALLTYPE SetHDRMetaData(
+		_In_ DXGI_HDR_METADATA_TYPE Type,
+		_In_ UINT Size,
+		_In_reads_opt_(Size) void *pMetaData);
 };
 
 

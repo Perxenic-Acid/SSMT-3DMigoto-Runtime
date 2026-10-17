@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <d3d11_1.h>
 #include <INITGUID.h>
@@ -153,6 +153,7 @@ private:
 
 	unsigned draw_number;
 	unsigned dispatch_number;
+	unsigned command_list_number;
 
 	FlatHashMap<UINT, ID3D11Buffer*> mReadbackBuffers = FlatHashMap<UINT, ID3D11Buffer*>(64);
 
@@ -261,7 +262,9 @@ public:
 
 	unsigned GetDrawNumber() const { return draw_number; };
 	unsigned GetDispatchNumber() const { return dispatch_number; };
-	void ResetCallCounters() { draw_number = 0; dispatch_number = 0; };
+	// 延迟 Context 的绘制由立即 Context 的 ExecuteCommandList 提交，也算游戏帧工作。
+	bool HasFrameCommands() const { return draw_number || dispatch_number || command_list_number; }
+	void ResetCallCounters() { draw_number = 0; dispatch_number = 0; command_list_number = 0; };
 
 	ID3D11Buffer* GetReadbackBuffer(UINT size);
 

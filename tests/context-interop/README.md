@@ -19,3 +19,11 @@ ctest --test-dir tests/context-interop/build -C Release --output-on-failure
 2026-10-16 另修复 `HackerSwapChain::GetDevice` 返回底层设备的问题：交换链持有的 `HackerDevice` 已有引用，取回设备时使用它的 `QueryInterface`，由现有包装 / Hook 策略决定接口身份并增加调用方引用。否则客户端重新取得的 Context 会绕过替换命令，尽管原始创建入口和 Present 仍经过 Runtime。
 
 对应的远程热注入回归在 Native 仓库 `3Dmigoto-Injector-V2` 的 `InjectorUnitySwapChain` 用例中：使用 WARP、BGRA / Device1、独立交换链，检查取回的 Context 身份，并回读由 INI 命令改变的清屏颜色。修复前退出 7，修复后通过；本目录原有六项 Context 回归也通过。这证明该绕过路径已修复，尚不能证明崩铁实机无 Mod 的全部原因已消除。真实 ReShade 硬件组合尚未完成验收。
+
+## F8 与重复 Present
+
+`capture-Present`、`capture-Present1` 和 `capture-Deferred` 使用 WARP 测试真实帧分析。INI 的反向 F24 绑定会在第一次处理输入时触发采集，不发送桌面按键、不抢前台、不启动游戏。夹具连续提交三次没有游戏 Draw 的 Present，再绘制一个带 VB 的三角形；检查本次新建目录中的 VB 为 48 字节、日志包含 Draw 与文件映射，且采集结束后的第二次 Draw 没有额外导出。延迟 Context 用例还验证 `ExecuteCommandList` 可以结束这一帧。
+
+修复前两个立即 Context 用例都创建了空采集目录，VB 数为零；修复后通过。辅助交换链也会执行游戏设备的帧动作，故不能把每一次 Present 都当作新游戏帧结束。现在只在游戏 Context 有 Draw、Dispatch 或命令列表提交后推进帧分析边界；Present 中的自定义着色器不作为此依据。输入轮询仍照常执行，等待期间可用原绑定中止采集。此回归证明提前结束路径已修复，不能替代实际游戏与图形插件组合验收，也不能单凭它解释历史日志缺少映射的全部原因。
+
+这三项回归拒绝 `SSMT_CONTEXT_TEST_HARDWARE`，避免转为硬件 GPU 压力测试。它们使用各自 DLL 目录，保留日志和转储以供检查，不清理玩家目录。

@@ -88,6 +88,7 @@ void HackerContext::FrameAnalysisDump(ID3D11Resource *resource, FrameAnalysisOpt
 
 HackerContext::HackerContext(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pContext1)
 {
+	ResetCallCounters();
 	mOrigDevice1 = pDevice1;
 	mOrigContext1 = pContext1;
 	mRealOrigContext1 = pContext1;
@@ -2247,8 +2248,10 @@ STDMETHODIMP_(void) HackerContext::ExecuteCommandList(THIS_
 	__in  ID3D11CommandList *pCommandList,
 	BOOL RestoreContextState)
 {
-	if (G->deferred_contexts_enabled)
+	if (G->deferred_contexts_enabled) {
 		mOrigContext1->ExecuteCommandList(pCommandList, RestoreContextState);
+		command_list_number++;
+	}
 
 	if (!RestoreContextState) {
 		// This is equivalent to calling ClearState() afterwards, so we

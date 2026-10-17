@@ -441,6 +441,9 @@ IDXGISwapChain1* HackerSwapChain::GetOrigSwapChain1()
 void HackerSwapChain::RunFrameActions()
 {
 	LogDebug("Running frame actions.  Device: %p\n", mHackerDevice);
+	// 辅助交换链可在游戏尚未提交下一帧 Draw 时重复执行本方法。
+	// Present 自身的 Mod 命令不能充当游戏帧边界，避免 F8 只留下 Present 日志。
+	const bool game_frame_has_commands = mHackerContext->HasFrameCommands();
 
 	// Regardless of log settings, since this runs every frame, let's flush the log
 	// so that the most lost will be one frame worth.  Tradeoff of performance to accuracy
@@ -463,7 +466,7 @@ void HackerSwapChain::RunFrameActions()
 	// affect something at the start of the frame.
 	RunCommandList(mHackerDevice, mHackerContext, &G->present_command_list, NULL, false);
 
-	if (G->analyse_frame) {
+	if (G->analyse_frame && game_frame_has_commands) {
 		// We don't allow hold to be changed mid-frame due to potential
 		// for filename conflicts, so use def_analyse_options:
 		if (G->def_analyse_options & FrameAnalysisOptions::HOLD) {

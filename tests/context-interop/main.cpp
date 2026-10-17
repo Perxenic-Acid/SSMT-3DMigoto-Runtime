@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <d3d11_1.h>
 #include <dxgi1_5.h>
+#include <d3dcompiler.h>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +14,78 @@ static LONG WINAPI crash(EXCEPTION_POINTERS* info)
     std::fflush(stdout);
     ExitProcess(10);
     return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static bool capture_after_empty_presents(ID3D11Device* device, IDXGISwapChain1* swap_chain)
+{
+    ID3D11DeviceContext* context = nullptr;
+    device->GetImmediateContext(&context);
+    ID3DBlob* code = nullptr;
+    ID3D11VertexShader* shader = nullptr;
+    ID3D11InputLayout* layout = nullptr;
+    ID3D11Buffer* vertices = nullptr;
+    const char source[] = "float4 main(float4 p:POSITION):SV_Position{return p;}";
+    HRESULT hr = D3DCompile(source, sizeof(source) - 1, nullptr, nullptr, nullptr,
+        "main", "vs_5_0", 0, 0, &code, nullptr);
+    if (SUCCEEDED(hr)) hr = device->CreateVertexShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &shader);
+    const D3D11_INPUT_ELEMENT_DESC element = { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0,
+        D3D11_INPUT_PER_VERTEX_DATA, 0 };
+    if (SUCCEEDED(hr)) hr = device->CreateInputLayout(&element, 1, code->GetBufferPointer(), code->GetBufferSize(), &layout);
+    const float data[12] = { -1, -1, 0, 1, 0, 1, 0, 1, 1, -1, 0, 1 };
+    D3D11_BUFFER_DESC desc{};
+    desc.ByteWidth = sizeof(data);
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA initial{};
+    initial.pSysMem = data;
+    if (SUCCEEDED(hr)) hr = device->CreateBuffer(&desc, &initial, &vertices);
+
+    const bool present1 = GetEnvironmentVariableW(L"SSMT_CONTEXT_TEST_PRESENT1", nullptr, 0) != 0;
+    auto present = [&]() {
+        DXGI_PRESENT_PARAMETERS parameters{};
+        return present1 ? swap_chain->Present1(0, 0, &parameters) : swap_chain->Present(0, 0);
+    };
+    // INI 用反向 F24 触发一次采集，无需发送桌面按键或取得前台。
+    if (SUCCEEDED(hr)) hr = present();
+    // 重现辅助交换链在下一次游戏 Draw 前额外提交 Present 的顺序。
+    for (int i = 0; i < 3 && SUCCEEDED(hr); ++i) hr = present();
+    if (SUCCEEDED(hr)) {
+        auto draw = [&](ID3D11DeviceContext* target) {
+            const UINT stride = 16, offset = 0;
+            target->IASetInputLayout(layout);
+            target->IASetVertexBuffers(0, 1, &vertices, &stride, &offset);
+            target->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            target->VSSetShader(shader, nullptr, 0);
+            target->Draw(3, 0);
+        };
+        if (GetEnvironmentVariableW(L"SSMT_CONTEXT_TEST_DEFERRED", nullptr, 0)) {
+            ID3D11DeviceContext* deferred = nullptr;
+            ID3D11CommandList* commands = nullptr;
+            hr = device->CreateDeferredContext(0, &deferred);
+            if (SUCCEEDED(hr)) {
+                draw(deferred);
+                hr = deferred->FinishCommandList(FALSE, &commands);
+            }
+            if (SUCCEEDED(hr)) context->ExecuteCommandList(commands, TRUE);
+            if (commands) commands->Release();
+            if (deferred) deferred->Release();
+        } else {
+            draw(context);
+        }
+        if (SUCCEEDED(hr)) hr = present();
+        // 采集结束后再画一次，确保普通模式仅转储一帧。
+        draw(context);
+        if (SUCCEEDED(hr)) hr = present();
+        context->ClearState();
+        context->Flush();
+    }
+    if (vertices) vertices->Release();
+    if (layout) layout->Release();
+    if (shader) shader->Release();
+    if (code) code->Release();
+    context->Release();
+    std::printf("frame capture Present%s=%08lx\n", present1 ? "1" : "", hr);
+    return SUCCEEDED(hr);
 }
 
 static bool test_swap_chain_interfaces(ID3D11Device* device)
@@ -62,6 +135,8 @@ static bool test_swap_chain_interfaces(ID3D11Device* device)
     if (same_identity) {
         metadata_hr = swap_chain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
         present_hr = swap_chain4->Present(0, DXGI_PRESENT_TEST);
+        if (GetEnvironmentVariableW(L"SSMT_CONTEXT_TEST_CAPTURE", nullptr, 0)
+            && !capture_after_empty_presents(device, swap_chain)) present_hr = E_FAIL;
     }
     std::printf("SwapChain4=%08lx same_identity=%d metadata=%08lx Present(TEST)=%08lx\n",
         hr, same_identity, metadata_hr, present_hr);

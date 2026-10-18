@@ -52,6 +52,29 @@ runtime 的开发脚本默认选择 GIMI，可用 `-GamePreset SRMI` 等参数�
 Rust 工具链尚未准备好时，可用 `./runtime/debug.ps1 -SkipNativeBuild -GamePreset WWMI` 只编译部署 C++ runtime 并通过 Run.exe 启动鸣潮。脚本不会默认关闭已经运行的游戏；需要此行为时显式传入 `-StopRunningGame`。
 需要 PluginHost 集成测试时，额外指定 `-PluginHostConfig`。
 
+调试脚本现在默认写入 `[Logging] log_level = info`，覆盖遗留的 `calls = 0` 或
+`log_level = disabled`，以便取得本次运行的 `d3d11_log.txt`。Info 不逐次记录 Draw；
+需要保留原日志开关时传 `-LogLevel preserve`，明确关闭用 `-LogLevel disabled`。
+完整 Debug 日志仅在明确需要时用 `-LogLevel debug`，避免长时间产生大量调用记录。
+
+画面正常渲染但 Mod 丢失 / 拉伸时，可在已部署 DLL 的 Runtime 目录执行：
+
+```powershell
+.\debug.ps1 -SkipNativeBuild -SkipRuntimeBuild -FrameAnalysisLogOnly
+```
+
+此模式启用 Hunting 并将 F8 设为单帧调用日志采集，停留在异常界面按一次 F8。
+读取本次 `d3d11_log.txt` 与新建 `FrameAnalysis-*/log*.txt`，检查实际命中的
+TextureOverride、原绘制是否跳过、CustomShader 重绘及 VB 偏移；不以 F10 重载作为修复。
+全局不再转储整帧资源，Mod 自身显式的 dump 命令仍按原声明执行。
+结束诊断并退出游戏后，从终端打印的独立 `d3dx.ini.before-debug-时间-标识.bak`
+恢复原配置；若其间另有修改，只还原对应的 Logging / Hunting 设置，不覆盖新修改。
+每次调试使用独立备份，后续运行不会覆盖首次备份。
+
+`-PrepareOnly` 仅完成配置和选定的构建步骤，不启动注入器或游戏；与两个 Skip
+参数一起使用可离线检查配置。脚本配置回归为 `tests/debug-configuration/test.ps1`，
+在临时目录运行，不启动游戏。游戏内画面仍须单独验收。
+
 提供给非开发者的启动入口是主仓库的 `scripts/start-wuwa-dlss5-mod.ps1`。
 部署时把它与 TestEnvironment.ps1 放到同一目录，再建立调用该脚本的桌面快捷方式。
 脚本会同步 RHI 更新后的 ReShade 副本、保留额外 DLL 列表，并在失败时显示中文提示和日志位置；已经运行游戏时不会关闭游戏。

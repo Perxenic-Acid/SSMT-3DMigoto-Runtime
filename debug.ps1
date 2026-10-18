@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$SkipNativeBuild,
 
@@ -14,7 +14,14 @@ param(
 
     [switch]$StopRunningGame,
 
-    [string]$PluginHostConfig
+    [string]$PluginHostConfig,
+
+    [ValidateSet('info', 'debug', 'disabled', 'preserve')]
+    [string]$LogLevel = 'info',
+
+    [switch]$FrameAnalysisLogOnly,
+
+    [switch]$PrepareOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -73,11 +80,27 @@ if (Get-Process -Name $gameProcessName -ErrorAction SilentlyContinue) {
     }
     Stop-TestGame -ProcessName $gameProcessName
 }
-Copy-Item -LiteralPath $IniPath -Destination "$IniPath.before-debug.bak" -Force
+# 每次保留独立原件，重复调试不能覆盖关闭诊断前的配置。
+$backupSuffix = (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+$configBackup = "$IniPath.before-debug-$backupSuffix.bak"
+Copy-Item -LiteralPath $IniPath -Destination $configBackup
+Write-Host "原配置备份：$configBackup"
 Set-TestLoaderSetting $IniPath 'launch' $GameExePath
 if ($PSBoundParameters.ContainsKey('GameArguments')) {
     Set-TestLoaderSetting $IniPath 'launch_args' $GameArguments
 }
+if ($LogLevel -ne 'preserve') {
+    # log_level 优先于 calls/debug；Info 记录初始化和资源错误，不逐次记录 Draw。
+    Set-TestIniSetting $IniPath 'Logging' 'log_level' $LogLevel
+}
+if ($FrameAnalysisLogOnly) {
+    Set-TestIniSetting $IniPath 'Hunting' 'hunting' '1'
+    Set-TestIniSetting $IniPath 'Hunting' 'analyse_frame' 'no_modifiers VK_F8'
+    Set-TestIniSetting $IniPath 'Hunting' 'analyse_options' 'log'
+    Write-Host '单帧日志诊断：进入异常界面后按一次 F8，仅采集调用与 Mod 命令，不转储整帧资源。'
+    Write-Host '诊断结束并退出游戏后，可从上面的备份恢复 d3dx.ini；如已另改配置，请仅恢复 Logging / Hunting 对应设置。'
+}
+Write-Host "本次 Runtime 日志：$(Join-Path $TestRuntimeDir 'd3d11_log.txt')（启动游戏后生成；prepare-only 不代表已有新日志）"
 
 if (-not $SkipNativeBuild) {
     & (Join-Path $RepoRoot 'build_native.ps1') `
@@ -89,6 +112,11 @@ if (-not $SkipNativeBuild) {
 
 if (-not $SkipRuntimeBuild) {
     & (Join-Path $RuntimeRoot 'release.ps1') -TestRuntimeDir $TestRuntimeDir
+}
+
+if ($PrepareOnly) {
+    Write-Host '准备完成，未启动游戏或注入器。'
+    return
 }
 
 $startOptions = @{

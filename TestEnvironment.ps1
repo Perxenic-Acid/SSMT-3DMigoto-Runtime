@@ -30,21 +30,24 @@
     return (Resolve-Path -LiteralPath $TestRuntimeDir).ProviderPath
 }
 
-function Set-TestLoaderSetting {
+function Set-TestIniSetting {
     param(
         [string]$IniPath,
+        [string]$Section,
         [string]$Name,
         [string]$Value
     )
 
-    # 仅修改 Loader 节，保留用户的 Mod 配置及其他同名设置。
+    # 按节修改，避免误改 Mod 命令或其他节中的同名键。
     $text = [IO.File]::ReadAllText($IniPath)
-    $sectionPattern = '(?ims)(^\[Loader\][^\r\n]*\r?\n)(.*?)(?=^\[|\z)'
-    $section = [regex]::Match($text, $sectionPattern)
-    if (-not $section.Success) {
-        throw "Missing [Loader] section: $IniPath"
+    $sectionPattern = '(?ims)(^\[' + [regex]::Escape($Section) + '\][^\r\n]*(?:\r?\n|\z))(.*?)(?=^\[|\z)'
+    $sectionMatch = [regex]::Match($text, $sectionPattern)
+    if (-not $sectionMatch.Success) {
+        $updated = $text.TrimEnd("`r", "`n") + "`r`n`r`n[$Section]`r`n$Name = $Value`r`n"
+        [IO.File]::WriteAllText($IniPath, $updated, (New-Object Text.UTF8Encoding($false)))
+        return
     }
-    $body = $section.Groups[2].Value
+    $body = $sectionMatch.Groups[2].Value
     $settingPattern = '(?im)^[\t ]*' + [regex]::Escape($Name) + '[\t ]*=[^\r\n]*'
     $replacement = "$Name = $Value"
     if ([regex]::IsMatch($body, $settingPattern)) {
@@ -52,9 +55,21 @@ function Set-TestLoaderSetting {
     } else {
         $body += "`r`n$replacement`r`n"
     }
-    $updated = $text.Substring(0, $section.Index) + $section.Groups[1].Value + $body +
-        $text.Substring($section.Index + $section.Length)
+    $header = $sectionMatch.Groups[1].Value
+    if (-not $header.EndsWith("`n")) { $header += "`r`n" }
+    $updated = $text.Substring(0, $sectionMatch.Index) + $header + $body +
+        $text.Substring($sectionMatch.Index + $sectionMatch.Length)
     if ($updated -ne $text) {
         [IO.File]::WriteAllText($IniPath, $updated, (New-Object Text.UTF8Encoding($false)))
     }
+}
+
+function Set-TestLoaderSetting {
+    param([string]$IniPath, [string]$Name, [string]$Value)
+
+    # 保留现有调用方的 Loader 校验；日志诊断则允许补充原本不存在的节。
+    if (-not [regex]::IsMatch([IO.File]::ReadAllText($IniPath), '(?im)^\[Loader\][^\r\n]*(?:\r?\n|\z)')) {
+        throw "Missing [Loader] section: $IniPath"
+    }
+    Set-TestIniSetting $IniPath 'Loader' $Name $Value
 }

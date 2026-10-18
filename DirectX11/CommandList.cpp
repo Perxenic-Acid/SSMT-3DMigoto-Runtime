@@ -437,6 +437,7 @@ static void RunCommandListComplete(HackerDevice *mHackerDevice,
 		ID3D11View *view,
 		bool post)
 {
+	mHackerContext->EnsureIniParams();
 	CommandListState state;
 	state.mHackerDevice = mHackerDevice;
 	state.mHackerContext = mHackerContext;

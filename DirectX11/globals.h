@@ -518,6 +518,8 @@ struct Globals
 	std::vector<DirectX::XMFLOAT4> iniParams;
 	int iniParamsReserved;
 	int IniParamsReg;
+	// 配置可由任意交换链重载，其他设备 / Context 在下次使用时同步资源。
+	uint64_t iniParamsGeneration = 1;
 
 	ResolutionInfo mResolutionInfo;
 	CommandList present_command_list;

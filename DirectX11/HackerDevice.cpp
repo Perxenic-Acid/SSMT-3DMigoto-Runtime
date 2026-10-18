@@ -282,6 +282,10 @@ HackerDevice::HackerDevice(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pConte
 
 HRESULT HackerDevice::CreateIniParamResources()
 {
+	mIniParamsGeneration = G->iniParamsGeneration;
+	LogInfo("SSMT IniParams: device %p synchronising generation %llu (%d parameters)\n",
+		this, (unsigned long long)mIniParamsGeneration, G->iniParamsReserved);
+
 	// No longer making this conditional. We are pretty well dependent on
 	// the ini params these days and not creating this view might cause
 	// issues with config reload.

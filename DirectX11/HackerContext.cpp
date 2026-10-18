@@ -1053,6 +1053,7 @@ void HackerContext::BeforeDraw(DrawContext &data)
 	if (!G->fix_enabled)
 		goto out_profile;
 
+	EnsureIniParams();
 	DeferredShaderReplacementBeforeDraw();
 
 	// Override settings?
@@ -1846,6 +1847,7 @@ bool HackerContext::BeforeDispatch(DispatchContext *context)
 	if (!G->fix_enabled)
 		return true;
 
+	EnsureIniParams();
 	DeferredShaderReplacementBeforeDispatch();
 
 	// Override settings?
@@ -3007,7 +3009,7 @@ void HackerContext::BindResources()
 	}
 
 	// Set constants from ini file if they exist
-	if (mHackerDevice->mIniResourceView && G->IniParamsReg >= 0) {
+	if (G->IniParamsReg >= 0) {
 		LogDebug("  adding ini constants as texture to shader resources in slot %i.\n", G->IniParamsReg);
 
 		(mOrigContext1->*OrigSetShaderResources)(G->IniParamsReg, 1, &mHackerDevice->mIniResourceView);
@@ -3033,6 +3035,21 @@ void HackerContext::Bind3DMigotoResources()
 	BindResources<&ID3D11DeviceContext::GSSetShaderResources>();
 	BindResources<&ID3D11DeviceContext::PSSetShaderResources>();
 	BindResources<&ID3D11DeviceContext::CSSetShaderResources>();
+	mBoundIniParamsGeneration = mHackerDevice->mIniParamsGeneration;
+}
+
+void HackerContext::EnsureIniParams()
+{
+	if (mBoundIniParamsGeneration == G->iniParamsGeneration)
+		return;
+
+	// 只在配置代次变化时进入冷路径，不在普通 Draw 上分配、查询接口或加锁。
+	// 不能在辅助设备触发重载后重跑 [Constants]，否则会重置玩家状态。
+	CriticalSectionGuard(&G->mCriticalSection);
+	if (mHackerDevice->mIniParamsGeneration != G->iniParamsGeneration)
+		mHackerDevice->CreateIniParamResources();
+	if (mBoundIniParamsGeneration != mHackerDevice->mIniParamsGeneration)
+		Bind3DMigotoResources();
 }
 
 void HackerContext::InitIniParams()

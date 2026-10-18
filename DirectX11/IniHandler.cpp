@@ -5249,28 +5249,23 @@ void ReloadConfig(HackerDevice *device)
 		optimise_command_lists(device);
 
 		MarkAllShadersDeferredUnprocessed();
-	}
+		++G->iniParamsGeneration;
 
-	// Execute the [Constants] command list in the immediate context to
-	// initialise iniParams and perform any other custom initialisation the
-	// user may have defined:
-	if (mHackerContext) {
-		if (G->iniParams.size() != G->iniParamsReserved) {
-			LogInfo("  Resizing IniParams from %Ii to %d\n", G->iniParams.size(), G->iniParamsReserved);
+		// 新代次初始化完成前，其他设备的同步冷路径须等待此临界区。
+		// 只在重载设备执行一次 [Constants]，其余设备复制初始化后的参数。
+		if (mHackerContext) {
+			if (G->iniParams.size() != G->iniParamsReserved) {
+				LogInfo("  Resizing IniParams from %Ii to %d\n", G->iniParams.size(), G->iniParamsReserved);
+			}
+			// 不能只比较全局数组长度：其他设备可能仍无纹理，或保留了旧代资源。
 			device->CreateIniParamResources();
 			mHackerContext->Bind3DMigotoResources();
-		}
 
-		mHackerContext->InitIniParams();
-	} else {
-		// We used to use GetImmediateContext here, which would ensure
-		// that the HackerContext had been created if it didn't exist
-		// for some reason, but that doesn't work in the case of
-		// hooking. I'm not positive we actually needed that (and if we
-		// did the [Present] command list would also be broken), so
-		// rather than continue to use it, issue a warning if the
-		// HackerContext doesn't exist.
-		LogOverlay(LOG_DIRE, "BUG: No HackerContext at ReloadConfig - please report this\n");
+			mHackerContext->InitIniParams();
+		} else {
+			// 沿用原有 Hook 模式约束，不在这里另建立即 Context。
+			LogOverlay(LOG_DIRE, "BUG: No HackerContext at ReloadConfig - please report this\n");
+		}
 	}
 
 	// Handle unknown persistent variables discovered by LoadConfigFile().

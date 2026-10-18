@@ -127,6 +127,7 @@ private:
 	ID3D11DeviceContext3 *mExtendedContext3 = nullptr;
 	ID3D11DeviceContext4 *mExtendedContext4 = nullptr;
 	HackerDevice *mHackerDevice;
+	uint64_t mBoundIniParamsGeneration = 0;
 
 	// These are per-context, moved from globals.h:
 	uint32_t mCurrentVertexBuffers[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT];
@@ -254,6 +255,7 @@ public:
 	HackerDevice* GetHackerDevice();
 	void Bind3DMigotoResources();
 	void InitIniParams();
+	void EnsureIniParams();
 	ID3D11DeviceContext1* GetPossiblyHookedOrigContext1();
 	ID3D11DeviceContext1* GetPassThroughOrigContext1();
 	void HookContext();

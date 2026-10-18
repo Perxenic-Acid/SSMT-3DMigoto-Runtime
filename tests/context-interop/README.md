@@ -41,3 +41,20 @@ ctest --test-dir tests/context-interop/build -C Release --output-on-failure
 `texture-interop` 只用 WARP，通过真实 INI 的 `checktextureoverride` 将蓝色纹理替换为绿色 DDS，并读取实际绑定及像素。分别覆盖旧版与 Device3 的 2D / 3D 创建、ShaderResourceView1，以及多次释放后交替创建匹配和不匹配内容；反例须保持原贴图。另检查创建时的尺寸覆盖、只验证参数时的 `S_FALSE`、失败返回，以及系统确实支持的非默认 `ROW_MAJOR` 布局。
 
 2026-10-18，旧 Runtime 的旧版入口通过，而 `CreateTexture2D1` / `CreateTexture3D1` 未登记资源，纹理替换和尺寸覆盖均被跳过。修复后新旧入口共用原有哈希、创建覆盖、Hunting 元信息及释放跟踪，实际创建仍调用对应版本的系统 API，保留 `TextureLayout`。本目录十一项软件回归通过；只检查 DLL、Context 身份或清屏命令无法覆盖此缺陷。此结果证明新版资源路径的缺陷已修复，尚不能确定它解释了玩家纯 3DMigoto 下的全部贴图异常，需要实机画面确认。
+
+## 多设备延迟配置与头像重绘
+
+`params-early` / `params-delayed` 明确使用两个 WARP 设备、隐藏交换链，以及配置加载前
+已经创建的 Device3 延迟 Context。由辅助交换链首先执行 Present；真实 INI 用
+`handling=skip` 和 post CustomShader 替换纹理，从 24 字节 VB 与 `t120` 的
+`first_vertex` 取数，再通过 `draw=from_caller` 重绘并回读像素。覆盖非零 BaseVertex、
+不同 IA 偏移、立即 / 延迟提交、相同参数数量重载、扩容、缩容和清空 Mod。
+重载使用 include 中的反向 F24 绑定，不向桌面发送按键。夹具拒绝硬件测试环境变量，
+检查 Runtime 私有设备身份、参数 SRV 和纹理宽度、退出码与完成标记。
+
+1.2.2.17 在延迟加载用例中缺少游戏设备的参数纹理；在预先加载用例中则于扩容后
+仍保留旧尺寸。简化单设备测试不能复现此缺陷。现按配置代次惰性更新各设备的参数
+纹理和各 Context 的绑定，不重跑其他设备的 `[Constants]`，清空时解除旧绑定。
+普通 Draw 仅比较代次；创建资源、加锁和初始化日志仅出现在代次变化的冷路径。
+两项新回归共检查 60 次绘制，连同原有用例共十三项通过。这证明资源同步缺陷已修复，
+仍需以游戏内头像拉伸 / 消失页面复测最终画面。

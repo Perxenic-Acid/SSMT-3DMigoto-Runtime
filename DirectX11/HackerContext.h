@@ -1,6 +1,6 @@
 ﻿#pragma once
 
-#include <d3d11_1.h>
+#include <d3d11_4.h>
 #include <INITGUID.h>
 
 #include "DrawCallInfo.h"
@@ -116,12 +116,16 @@ struct MappedResourceInfo {
 // Hierarchy:
 //  HackerContext <- ID3D11DeviceContext1 <- ID3D11DeviceContext <- ID3D11DeviceChild <- IUnknown
 
-class HackerContext : public ID3D11DeviceContext1
+class HackerContext : public ID3D11DeviceContext4
 {
 private:
 	ID3D11Device1 *mOrigDevice1;
 	ID3D11DeviceContext1 *mOrigContext1;
 	ID3D11DeviceContext1 *mRealOrigContext1;
+	// 与 mRealOrigContext1 同寿命的借用接口；初始化时发现，热路径只转发。
+	ID3D11DeviceContext2 *mExtendedContext2 = nullptr;
+	ID3D11DeviceContext3 *mExtendedContext3 = nullptr;
+	ID3D11DeviceContext4 *mExtendedContext4 = nullptr;
 	HackerDevice *mHackerDevice;
 
 	// These are per-context, moved from globals.h:
@@ -1336,4 +1340,5 @@ public:
 		/* [annotation] */
 		_In_reads_opt_(NumRects)  const D3D11_RECT *pRects,
 		UINT NumRects);
+	#include "SSMTContextExtensions.h"
 };

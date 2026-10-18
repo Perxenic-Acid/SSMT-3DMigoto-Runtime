@@ -92,6 +92,9 @@ HackerContext::HackerContext(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pCon
 	mOrigDevice1 = pDevice1;
 	mOrigContext1 = pContext1;
 	mRealOrigContext1 = pContext1;
+	if (SUCCEEDED(pContext1->QueryInterface(IID_PPV_ARGS(&mExtendedContext2)))) mExtendedContext2->Release();
+	if (SUCCEEDED(pContext1->QueryInterface(IID_PPV_ARGS(&mExtendedContext3)))) mExtendedContext3->Release();
+	if (SUCCEEDED(pContext1->QueryInterface(IID_PPV_ARGS(&mExtendedContext4)))) mExtendedContext4->Release();
 	mHackerDevice = NULL;
 
 	memset(mCurrentVertexBuffers, 0, sizeof(mCurrentVertexBuffers));
@@ -1184,6 +1187,21 @@ HRESULT STDMETHODCALLTYPE HackerContext::QueryInterface(
 	/* [iid_is][out] */ _COM_Outptr_ void __RPC_FAR *__RPC_FAR *ppvObject)
 {
 	LogDebug("HackerContext::QueryInterface(%s@%p) called with IID: %s\n", type_name(this), this, NameFromIID(riid).c_str());
+	if (!ppvObject) return E_POINTER;
+	if (!G->enable_platform_update && (riid == __uuidof(ID3D11DeviceContext1) ||
+		riid == __uuidof(ID3D11DeviceContext2) || riid == __uuidof(ID3D11DeviceContext3) ||
+		riid == __uuidof(ID3D11DeviceContext4))) {
+		*ppvObject = nullptr;
+		return E_NOINTERFACE;
+	}
+	if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D11DeviceChild) ||
+		(riid == __uuidof(ID3D11DeviceContext2) && mExtendedContext2) ||
+		(riid == __uuidof(ID3D11DeviceContext3) && mExtendedContext3) ||
+		(riid == __uuidof(ID3D11DeviceContext4) && mExtendedContext4)) {
+		AddRef();
+		*ppvObject = static_cast<ID3D11DeviceContext4*>(this);
+		return S_OK;
+	}
 
 	if (ppvObject && IsEqualIID(riid, IID_HackerContext)) {
 		// This is a special case - only 3DMigoto itself should know
@@ -3749,3 +3767,5 @@ void STDMETHODCALLTYPE HackerContext::DiscardView1(
 {
 	mOrigContext1->DiscardView1(pResourceView, pRects, NumRects);
 }
+
+#include "SSMTContextExtensions.inl"

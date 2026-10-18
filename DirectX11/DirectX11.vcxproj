@@ -400,6 +400,12 @@ xcopy "$(SolutionDir)Dependencies\*.*" "$(TargetDir)"  /E /Y /s
       <Message>Copy all Dependencies to target directory.</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClInclude Include="SSMTDeviceExtensions.h" />
+    <ClInclude Include="SSMTContextExtensions.h" />
+    <None Include="SSMTDeviceExtensions.inl" />
+    <None Include="SSMTContextExtensions.inl" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

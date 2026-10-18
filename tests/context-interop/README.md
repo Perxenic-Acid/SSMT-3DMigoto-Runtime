@@ -27,3 +27,11 @@ ctest --test-dir tests/context-interop/build -C Release --output-on-failure
 修复前两个立即 Context 用例都创建了空采集目录，VB 数为零；修复后通过。辅助交换链也会执行游戏设备的帧动作，故不能把每一次 Present 都当作新游戏帧结束。现在只在游戏 Context 有 Draw、Dispatch 或命令列表提交后推进帧分析边界；Present 中的自定义着色器不作为此依据。输入轮询仍照常执行，等待期间可用原绑定中止采集。此回归证明提前结束路径已修复，不能替代实际游戏与图形插件组合验收，也不能单凭它解释历史日志缺少映射的全部原因。
 
 这三项回归拒绝 `SSMT_CONTEXT_TEST_HARDWARE`，避免转为硬件 GPU 压力测试。它们使用各自 DLL 目录，保留日志和转储以供检查，不清理玩家目录。
+
+## ReShade 接口升级与 Mod 绕过
+
+`context-upgrade` 只用 WARP：创建设备时不请求立即 Context，再通过 Device1–5、Context1–4、IUnknown 和 DeviceChild 取回接口，回读 INI 替换后的清屏颜色。另直接调用新版立即 / 延迟 Context 方法并执行命令列表，避免只检查 DLL 或热键就误报成功。
+
+2026-10-18 修复前，Device2–5、Context2–4 及 IUnknown / DeviceChild 转换返回底层对象，替换清屏无效。ReShade 6.8.0 的 `check_and_upgrade_interface` 会采用升级后的指针，因此该漏洞可使渲染绕过 Runtime，而 Present、F10 与 Hunting 仍然工作。现将接口尾部能力局部转发，继承的绘制及绑定保持经过 Runtime；新增接口沿用 `allow_platform_update` 门禁。GetImmediateContext1–3 共用资源初始化路径，不额外持有底层对象引用。
+
+修复后本目录十项软件回归通过。WARP 不会执行 ReShade 的硬件设备代理分支；该结果证明接口绕过已修复，原神 Feeder 的 Mod 画面、NR 效果及硬件驱动稳定性仍需游戏实测。

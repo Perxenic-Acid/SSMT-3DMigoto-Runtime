@@ -252,6 +252,10 @@ HackerDevice::HackerDevice(ID3D11Device1 *pDevice1, ID3D11DeviceContext1 *pConte
 	mOrigDevice1 = pDevice1;
 	mRealOrigDevice1 = pDevice1;
 	mOrigContext1 = pContext1;
+	if (SUCCEEDED(pDevice1->QueryInterface(IID_PPV_ARGS(&mExtendedDevice2)))) mExtendedDevice2->Release();
+	if (SUCCEEDED(pDevice1->QueryInterface(IID_PPV_ARGS(&mExtendedDevice3)))) mExtendedDevice3->Release();
+	if (SUCCEEDED(pDevice1->QueryInterface(IID_PPV_ARGS(&mExtendedDevice4)))) mExtendedDevice4->Release();
+	if (SUCCEEDED(pDevice1->QueryInterface(IID_PPV_ARGS(&mExtendedDevice5)))) mExtendedDevice5->Release();
 
 	// 未安装代理时查询失败，保留原有行为。只缓存能力和系统模块范围，
 	// 不长期持有原始设备引用，避免 Release() 无法观察到零计数。
@@ -1586,6 +1590,22 @@ HRESULT STDMETHODCALLTYPE HackerDevice::QueryInterface(
 	}
 
 	LogDebug("HackerDevice::QueryInterface(%s@%p) called with IID: %s\n", type_name(this), this, NameFromIID(riid).c_str());
+	if (!ppvObject) return E_POINTER;
+	if (!G->enable_platform_update && (riid == __uuidof(ID3D11Device1) ||
+		riid == __uuidof(ID3D11Device2) || riid == __uuidof(ID3D11Device3) ||
+		riid == __uuidof(ID3D11Device4) || riid == __uuidof(ID3D11Device5))) {
+		*ppvObject = nullptr;
+		return E_NOINTERFACE;
+	}
+	if (riid == __uuidof(IUnknown) ||
+		(riid == __uuidof(ID3D11Device2) && mExtendedDevice2) ||
+		(riid == __uuidof(ID3D11Device3) && mExtendedDevice3) ||
+		(riid == __uuidof(ID3D11Device4) && mExtendedDevice4) ||
+		(riid == __uuidof(ID3D11Device5) && mExtendedDevice5)) {
+		AddRef();
+		*ppvObject = static_cast<ID3D11Device5*>(this);
+		return S_OK;
+	}
 
 	if (ppvObject && IsEqualIID(riid, IID_HackerDevice)) {
 		// This is a special case - only 3DMigoto itself should know
@@ -3019,30 +3039,14 @@ STDMETHODIMP_(void) HackerDevice::GetImmediateContext1(
 		return;
 	}
 
-	// We still need to call the original function to make sure the reference counts are correct:
-	mOrigDevice1->GetImmediateContext1(ppImmediateContext);
-
-	// we can arrive here with no mHackerContext created if one was not
-	// requested from CreateDevice/CreateDeviceFromSwapChain. In that case
-	// we need to wrap the immediate context now:
-	if (mHackerContext == nullptr)
-	{
-		LogInfo("*** HackerContext1 missing at HackerDevice::GetImmediateContext1\n");
-
-		analyse_iunknown(*ppImmediateContext);
-
-		mHackerContext = HackerContextFactory(mOrigDevice1, *ppImmediateContext);
-		mHackerContext->SetHackerDevice(this);
-		LogInfo("  mHackerContext %p created to wrap %p\n", mHackerContext, *ppImmediateContext);
+	// 共用延迟初始化，确保 ReShade 未在创建设备时请求 Context 的路径也绑定 Mod 资源。
+	*ppImmediateContext = nullptr;
+	ID3D11DeviceContext* context = nullptr;
+	GetImmediateContext(&context);
+	if (context) {
+		context->QueryInterface(IID_PPV_ARGS(ppImmediateContext));
+		context->Release();
 	}
-	else if (mHackerContext->GetPossiblyHookedOrigContext1() != *ppImmediateContext)
-	{
-		LogInfo("WARNING: mHackerContext %p found to be wrapping %p instead of %p at HackerDevice::GetImmediateContext1!\n",
-			mHackerContext, mHackerContext->GetPossiblyHookedOrigContext1(), *ppImmediateContext);
-	}
-
-	*ppImmediateContext = reinterpret_cast<ID3D11DeviceContext1*>(mHackerContext);
-	LogInfo("  returns handle = %p\n", *ppImmediateContext);
 }
 
 
@@ -3140,3 +3144,5 @@ STDMETHODIMP HackerDevice::OpenSharedResourceByName(
 	return mOrigDevice1->OpenSharedResourceByName(lpName, dwDesiredAccess, returnedInterface, ppResource);
 }
 
+
+#include "SSMTDeviceExtensions.inl"

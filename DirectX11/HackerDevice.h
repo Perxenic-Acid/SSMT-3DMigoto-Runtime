@@ -2,7 +2,7 @@
 
 #include <unordered_map>
 
-#include <d3d11_1.h>
+#include <d3d11_4.h>
 #include <INITGUID.h>
 
 #include "HackerContext.h"
@@ -48,7 +48,7 @@ class HackerSwapChain;
 // Hierarchy:
 //  HackerDevice <- ID3D11Device1 <- ID3D11Device <- IUnknown
 
-class HackerDevice : public ID3D11Device1
+class HackerDevice : public ID3D11Device5
 {
 private:
 	ID3D11Device1 *mOrigDevice1;
@@ -58,6 +58,12 @@ private:
 	UINT_PTR mSystemDxgiStart = 0;
 	UINT_PTR mSystemDxgiEnd = 0;
 	ID3D11DeviceContext1 *mOrigContext1;
+	// 借用接口与 mRealOrigDevice1 属于同一 COM 对象，不额外持有引用，
+	// 否则底层 Release 永远不能归零，包装器也无法销毁。
+	ID3D11Device2 *mExtendedDevice2 = nullptr;
+	ID3D11Device3 *mExtendedDevice3 = nullptr;
+	ID3D11Device4 *mExtendedDevice4 = nullptr;
+	ID3D11Device5 *mExtendedDevice5 = nullptr;
 	IUnknown *mUnknown;
 
 	HackerContext *mHackerContext;
@@ -530,6 +536,7 @@ public:
 		_In_  REFIID returnedInterface,
 		/* [annotation] */
 		_Out_  void **ppResource); 
+	#include "SSMTDeviceExtensions.h"
 };
 
 HackerDevice* lookup_hacker_device(IUnknown *unknown);

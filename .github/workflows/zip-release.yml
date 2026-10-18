@@ -21,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: runtime-build-${{ github.ref }
+  group: runtime-build-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -105,8 +105,8 @@ jobs:
       group: runtime-release
       cancel-in-progress: false
     env:
-      GH_TOKEN: ${{ github.token }
-      GH_REPO: ${{ github.repository }
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - name: Download verified build artifacts

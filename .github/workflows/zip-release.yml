@@ -1,69 +1,165 @@
-name: Zip Release
-
+name: Build and publish SSMT Runtime
 
 on:
   push:
+    branches:
+      - master
     tags:
-      # Trigger on tags (i.e. v1.0.0, v2.1.0, etc)
       - 'v*'
-      
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      publish_rolling:
+        description: Update the rolling prerelease (master only)
+        type: boolean
+        required: false
+        default: false
 
 permissions:
-  contents: write
+  contents: read
 
+concurrency:
+  group: runtime-build-${{ github.ref }
+  cancel-in-progress: false
 
 jobs:
   build:
+    name: Build Windows x64
     runs-on: windows-2022
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout with version history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-    - name: Generate version header
-      shell: pwsh
-      run: |
-        .\tools\generate-version.ps1 `
-          -VersionFile .\version.h `
-          -OutputFile .\version.generated.h `
-          -Tag "${{ github.ref_name }}"
+      - name: Set up Visual Studio 2022 MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '[17.0,18.0)'
 
-    - name: Add MSBuild for VS2022 to PATH
-      uses: microsoft/setup-msbuild@v2
-      with:
-        vs-version: '[17.0,18.0)'
+      - name: Compile Release x64
+        shell: pwsh
+        run: |
+          & msbuild.exe .\StereovisionHacks.sln /m /t:DirectX11 /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo
+          if ($LASTEXITCODE -ne 0) {
+            throw "MSBuild failed with exit code $LASTEXITCODE"
+          }
 
-    - name: Build solution
-      run: >
-        msbuild StereoVisionHacks.sln
-        -property:Configuration="Zip Release"
-        -property:Platform=x64
-        -target:rebuild
-        -verbosity:minimal
+      - name: Package DLL and separate debug symbols
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = Join-Path $PWD 'x64\Release'
+          $dist = Join-Path $PWD 'dist'
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
-    - name: Zip DLLs
-      run: |
-        $dll_files = Get-ChildItem -Path './x64/Zip Release' -Filter '*.dll'
-        Compress-Archive -Path $dll_files.FullName -DestinationPath './LibrariesTemp.zip'
-        
-    - name: Create GitHub Release
-      id: create_release
-      uses: actions/create-release@v1
-      with:
-        tag_name: ${{ github.ref_name }}
-        release_name: ${{ github.ref_name }}
-        prerelease: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          $dll = Join-Path $output 'd3d11.dll'
+          $pdb = Join-Path $output 'd3d11.pdb'
+          foreach ($file in @($dll, $pdb)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Missing Runtime build output: $file"
+            }
+            if ((Get-Item -LiteralPath $file).Length -eq 0) {
+              throw "Empty Runtime build output: $file"
+            }
+          }
 
-    - name: Upload Zip as Release Asset
-      uses: actions/upload-release-asset@v1
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: './LibrariesTemp.zip'
-        asset_name: XXMI-PACKAGE-${{ github.ref_name }}.zip
-        asset_content_type: application/zip
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          Compress-Archive -LiteralPath $dll -DestinationPath (Join-Path $dist 'SSMT-Runtime-x64.zip')
+          Compress-Archive -LiteralPath $pdb -DestinationPath (Join-Path $dist 'SSMT-Runtime-x64-symbols.zip')
+
+          $files = @(Get-ChildItem -LiteralPath $dist -Filter '*.zip' -File | Sort-Object Name)
+          $checksums = @($files | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
+          })
+          [IO.File]::WriteAllLines(
+            (Join-Path $dist 'SHA256SUMS.txt'),
+            [string[]]$checksums,
+            [Text.UTF8Encoding]::new($false)
+          )
+          Get-ChildItem -LiteralPath $dist | Format-Table Name, Length
+
+      - name: Retain build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SSMT-Runtime-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: >-
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v'))) ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/master' && inputs.publish_rolling)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: runtime-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }
+      GH_REPO: ${{ github.repository }
+
+    steps:
+      - name: Download verified build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: SSMT-Runtime-x64
+          path: dist
+
+      - name: Publish versioned release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* \
+              --verify-tag \
+              --title "SSMT Runtime $tag" \
+              --generate-notes
+          fi
+
+      - name: Update rolling prerelease
+        if: github.ref == 'refs/heads/master'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Keep the rolling tag pointing at the binaries' exact source commit.
+          if gh api "repos/$GH_REPO/git/ref/tags/rolling" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/rolling" \
+              -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" \
+              -f ref='refs/tags/rolling' -f sha="$GITHUB_SHA" >/dev/null
+          fi
+
+          notes="Automatic prerelease from master. Commit: $GITHUB_SHA
+
+          Download SSMT-Runtime-x64.zip for d3d11.dll. Debug symbols are distributed separately.
+          SHA256SUMS.txt contains checksums for both archives."
+
+          if gh release view rolling >/dev/null 2>&1; then
+            gh release upload rolling dist/* --clobber
+            gh release edit rolling \
+              --title 'SSMT Runtime (rolling)' \
+              --notes "$notes" \
+              --prerelease
+          else
+            gh release create rolling dist/* \
+              --verify-tag \
+              --title 'SSMT Runtime (rolling)' \
+              --notes "$notes" \
+              --prerelease
+          fi

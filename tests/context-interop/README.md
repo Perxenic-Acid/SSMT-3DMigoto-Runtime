@@ -35,3 +35,9 @@ ctest --test-dir tests/context-interop/build -C Release --output-on-failure
 2026-10-18 修复前，Device2–5、Context2–4 及 IUnknown / DeviceChild 转换返回底层对象，替换清屏无效。ReShade 6.8.0 的 `check_and_upgrade_interface` 会采用升级后的指针，因此该漏洞可使渲染绕过 Runtime，而 Present、F10 与 Hunting 仍然工作。现将接口尾部能力局部转发，继承的绘制及绑定保持经过 Runtime；新增接口沿用 `allow_platform_update` 门禁。GetImmediateContext1–3 共用资源初始化路径，不额外持有底层对象引用。
 
 修复后本目录十项软件回归通过。WARP 不会执行 ReShade 的硬件设备代理分支；该结果证明接口绕过已修复，原神 Feeder 的 Mod 画面、NR 效果及硬件驱动稳定性仍需游戏实测。
+
+## 新版纹理创建与替换
+
+`texture-interop` 只用 WARP，通过真实 INI 的 `checktextureoverride` 将蓝色纹理替换为绿色 DDS，并读取实际绑定及像素。分别覆盖旧版与 Device3 的 2D / 3D 创建、ShaderResourceView1，以及多次释放后交替创建匹配和不匹配内容；反例须保持原贴图。另检查创建时的尺寸覆盖、只验证参数时的 `S_FALSE`、失败返回，以及系统确实支持的非默认 `ROW_MAJOR` 布局。
+
+2026-10-18，旧 Runtime 的旧版入口通过，而 `CreateTexture2D1` / `CreateTexture3D1` 未登记资源，纹理替换和尺寸覆盖均被跳过。修复后新旧入口共用原有哈希、创建覆盖、Hunting 元信息及释放跟踪，实际创建仍调用对应版本的系统 API，保留 `TextureLayout`。本目录十一项软件回归通过；只检查 DLL、Context 身份或清屏命令无法覆盖此缺陷。此结果证明新版资源路径的缺陷已修复，尚不能确定它解释了玩家纯 3DMigoto 下的全部贴图异常，需要实机画面确认。

@@ -131,6 +131,10 @@ private:
 	HackerInputLayout* FindCachedInputLayout(uint64_t hash);
 	void CacheInputLayout(uint64_t hash, HackerInputLayout* layout);
 	void ClearInputLayoutCache();
+	HRESULT CreateTexture2DImpl(const D3D11_TEXTURE2D_DESC *desc, const D3D11_SUBRESOURCE_DATA *data,
+		ID3D11Texture2D **texture, const D3D11_TEXTURE2D_DESC1 *extended_desc);
+	HRESULT CreateTexture3DImpl(const D3D11_TEXTURE3D_DESC *desc, const D3D11_SUBRESOURCE_DATA *data,
+		ID3D11Texture3D **texture, const D3D11_TEXTURE3D_DESC1 *extended_desc);
 
 public:
 	ID3D11ShaderResourceView *mZBufferResourceView;

@@ -1,4 +1,4 @@
-// 尾部 COM 方法仅转发新增能力，继承的 Draw / 资源绑定继续走 Runtime。
+// 尾部 COM 方法保留新增能力；资源创建与继承的 Draw / 绑定仍须经过 Runtime。
 
 void STDMETHODCALLTYPE HackerDevice::GetImmediateContext2(ID3D11DeviceContext2 **ppImmediateContext)
 {
@@ -39,13 +39,26 @@ HRESULT STDMETHODCALLTYPE HackerDevice::CheckMultisampleQualityLevels1(DXGI_FORM
 
 HRESULT STDMETHODCALLTYPE HackerDevice::CreateTexture2D1(const D3D11_TEXTURE2D_DESC1 *pDesc1, const D3D11_SUBRESOURCE_DATA *pInitialData, ID3D11Texture2D1 **ppTexture2D)
 {
-    return mExtendedDevice3->CreateTexture2D1(pDesc1, pInitialData, ppTexture2D);
+    if (!pDesc1) return mExtendedDevice3->CreateTexture2D1(pDesc1, pInitialData, ppTexture2D);
+    D3D11_TEXTURE2D_DESC desc;
+    memcpy(&desc, pDesc1, sizeof(desc));
+    ID3D11Texture2D* texture = nullptr;
+    const HRESULT hr = CreateTexture2DImpl(&desc, pInitialData, ppTexture2D ? &texture : nullptr, pDesc1);
+    // Impl 的新版分支直接持有 CreateTexture2D1 返回的接口及其调用方引用。
+    if (ppTexture2D) *ppTexture2D = static_cast<ID3D11Texture2D1*>(texture);
+    return hr;
 }
 
 
 HRESULT STDMETHODCALLTYPE HackerDevice::CreateTexture3D1(const D3D11_TEXTURE3D_DESC1 *pDesc1, const D3D11_SUBRESOURCE_DATA *pInitialData, ID3D11Texture3D1 **ppTexture3D)
 {
-    return mExtendedDevice3->CreateTexture3D1(pDesc1, pInitialData, ppTexture3D);
+    if (!pDesc1) return mExtendedDevice3->CreateTexture3D1(pDesc1, pInitialData, ppTexture3D);
+    D3D11_TEXTURE3D_DESC desc;
+    memcpy(&desc, pDesc1, sizeof(desc));
+    ID3D11Texture3D* texture = nullptr;
+    const HRESULT hr = CreateTexture3DImpl(&desc, pInitialData, ppTexture3D ? &texture : nullptr, pDesc1);
+    if (ppTexture3D) *ppTexture3D = static_cast<ID3D11Texture3D1*>(texture);
+    return hr;
 }
 
 

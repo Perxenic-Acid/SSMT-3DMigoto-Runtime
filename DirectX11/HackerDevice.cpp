@@ -2350,6 +2350,13 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11Texture2D **ppTexture2D)
 {
+	return CreateTexture2DImpl(pDesc, pInitialData, ppTexture2D, nullptr);
+}
+
+HRESULT HackerDevice::CreateTexture2DImpl(const D3D11_TEXTURE2D_DESC *pDesc,
+	const D3D11_SUBRESOURCE_DATA *pInitialData, ID3D11Texture2D **ppTexture2D,
+	const D3D11_TEXTURE2D_DESC1 *extended_desc)
+{
 	D3D11_TEXTURE2D_DESC newDesc;
 	const D3D11_TEXTURE2D_DESC *pNewDesc = NULL;
 
@@ -2407,7 +2414,18 @@ STDMETHODIMP HackerDevice::CreateTexture2D(THIS_
 
 	// Actual creation:
 	LockResourceCreationMode();
-	HRESULT hr = mOrigDevice1->CreateTexture2D(pNewDesc, pInitialData, ppTexture2D);
+	HRESULT hr;
+	if (extended_desc) {
+		// 两个入口共用原有哈希、覆盖及释放跟踪；保留新版 TextureLayout 语义。
+		D3D11_TEXTURE2D_DESC1 desc1 = *extended_desc;
+		static_assert(offsetof(D3D11_TEXTURE2D_DESC1, TextureLayout) == sizeof(D3D11_TEXTURE2D_DESC), "Texture2D descriptor prefix");
+		memcpy(&desc1, pNewDesc, sizeof(*pNewDesc));
+		ID3D11Texture2D1 *texture = nullptr;
+		hr = mExtendedDevice3->CreateTexture2D1(&desc1, pInitialData, ppTexture2D ? &texture : nullptr);
+		if (ppTexture2D) *ppTexture2D = texture;
+	} else {
+		hr = mOrigDevice1->CreateTexture2D(pNewDesc, pInitialData, ppTexture2D);
+	}
 	UnlockResourceCreationMode();
 
 	if (ppTexture2D) LogDebug("  returns result = %x, handle = %p\n", hr, *ppTexture2D);
@@ -2444,6 +2462,13 @@ STDMETHODIMP HackerDevice::CreateTexture3D(THIS_
 	/* [annotation] */
 	__out_opt  ID3D11Texture3D **ppTexture3D)
 {
+	return CreateTexture3DImpl(pDesc, pInitialData, ppTexture3D, nullptr);
+}
+
+HRESULT HackerDevice::CreateTexture3DImpl(const D3D11_TEXTURE3D_DESC *pDesc,
+	const D3D11_SUBRESOURCE_DATA *pInitialData, ID3D11Texture3D **ppTexture3D,
+	const D3D11_TEXTURE3D_DESC1 *extended_desc)
+{
 	D3D11_TEXTURE3D_DESC newDesc;
 	const D3D11_TEXTURE3D_DESC *pNewDesc = NULL;
 
@@ -2478,7 +2503,17 @@ STDMETHODIMP HackerDevice::CreateTexture3D(THIS_
 	pNewDesc = process_texture_override(hash, pDesc, &newDesc);
 
 	LockResourceCreationMode();
-	HRESULT hr = mOrigDevice1->CreateTexture3D(pNewDesc, pInitialData, ppTexture3D);
+	HRESULT hr;
+	if (extended_desc) {
+		D3D11_TEXTURE3D_DESC1 desc1 = *extended_desc;
+		static_assert(offsetof(D3D11_TEXTURE3D_DESC1, TextureLayout) == sizeof(D3D11_TEXTURE3D_DESC), "Texture3D descriptor prefix");
+		memcpy(&desc1, pNewDesc, sizeof(*pNewDesc));
+		ID3D11Texture3D1 *texture = nullptr;
+		hr = mExtendedDevice3->CreateTexture3D1(&desc1, pInitialData, ppTexture3D ? &texture : nullptr);
+		if (ppTexture3D) *ppTexture3D = texture;
+	} else {
+		hr = mOrigDevice1->CreateTexture3D(pNewDesc, pInitialData, ppTexture3D);
+	}
 	UnlockResourceCreationMode();
 
 	// Register texture.

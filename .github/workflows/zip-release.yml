@@ -68,6 +68,13 @@ jobs:
             }
           }
 
+          $version = (Get-Item -LiteralPath $dll).VersionInfo
+          if ($version.FileMajorPart -eq 0 -and $version.FileMinorPart -eq 0 -and
+              $version.FileBuildPart -eq 0 -and $version.FilePrivatePart -eq 0) {
+            throw 'Runtime 文件版本为 0.0.0.0，禁止发布无法用于更新比较的 DLL。'
+          }
+          Write-Host "Runtime 文件版本：$($version.FileVersion)"
+
           Compress-Archive -LiteralPath $dll -DestinationPath (Join-Path $dist 'SSMT-Runtime-x64.zip')
           Compress-Archive -LiteralPath $pdb -DestinationPath (Join-Path $dist 'SSMT-Runtime-x64-symbols.zip')
 

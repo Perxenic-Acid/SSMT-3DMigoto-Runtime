@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$VersionFile = (Join-Path $PSScriptRoot "..\version.h"),
     [string]$OutputFile = (Join-Path $PSScriptRoot "..\version.generated.h"),
@@ -100,6 +100,7 @@ else {
 # ---------------------------------------------------------------------------
 
 $hasVersionTag = $true
+$baselineRef = $null
 
 if ([string]::IsNullOrWhiteSpace($Tag)) {
     try {
@@ -111,10 +112,25 @@ if ([string]::IsNullOrWhiteSpace($Tag)) {
         )
     }
     catch {
-        # A repository without any version tag is a valid development state.
-        # Generate a fallback 0.0.0.0 header instead of failing the build.
-        $Tag = $null
-        $hasVersionTag = $false
+        # Fork 的云端仓库可以只有 rolling 标签；不能让同一源码在本地为 1.x、云端为 0.0.0.0。
+        # 基线随源码固定，只有它确实是当前提交的祖先时才用于计数，不依赖可移动的 rolling。
+        $baselineFile = Join-Path $PSScriptRoot 'version-baseline.json'
+        if (Test-Path -LiteralPath $baselineFile -PathType Leaf) {
+            $baseline = Get-Content -LiteralPath $baselineFile -Raw | ConvertFrom-Json
+            if ($baseline.commit -notmatch '^[0-9a-fA-F]{40}$') {
+                throw 'Runtime 版本基线提交无效。'
+            }
+            & git merge-base --is-ancestor $baseline.commit HEAD
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Runtime 版本基线不是当前源码的祖先；请检查 checkout 历史或版本基线。'
+            }
+            $Tag = [string]$baseline.version
+            $baselineRef = [string]$baseline.commit
+        }
+        else {
+            $Tag = $null
+            $hasVersionTag = $false
+        }
     }
 }
 
@@ -152,21 +168,23 @@ $workingTreeStatus = Invoke-Git @(
 $isDirty = -not [string]::IsNullOrWhiteSpace($workingTreeStatus)
 
 if ($hasVersionTag) {
+    $versionRef = if ($baselineRef) { $baselineRef } else { $Tag }
     $tagCommit = Invoke-Git @(
         "rev-list",
         "-n",
         "1",
-        $Tag
+        $versionRef
     )
 
     $commitsSinceTag = [int](Invoke-Git @(
         "rev-list",
-        "$Tag..HEAD",
+        "$versionRef..HEAD",
         "--count"
     ))
 
     $isRelease = (
         ($headCommit -eq $tagCommit) -and
+        (-not $baselineRef) -and
         (-not $isDirty)
     )
 
@@ -286,7 +304,7 @@ $utf8 = New-Object System.Text.UTF8Encoding($false)
 $version = "$major.$minor.$revision.$build"
 
 $sourceTagDisplay = if ($hasVersionTag) {
-    $Tag
+    if ($baselineRef) { "$Tag (源码基线 $baselineRef)" } else { $Tag }
 }
 else {
     "<none>"

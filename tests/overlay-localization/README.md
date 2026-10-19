@@ -14,8 +14,13 @@ ctest --test-dir tests/overlay-localization/build -C Release --output-on-failure
 
 - 验证 `auto`、`en`、`zh_s` 以及无效配置处理。
 - 验证窄 / 宽格式串、Unicode 路径、动态宽度哈希、错误码和超长消息。
-- 扫描整份翻译目录，比较原文与译文的 printf 参数序列。
-- 实际系统字形上传并用 SpriteBatch 绘制，回读像素，并生成 `overlay-preview.bmp`。
+- 扫描整份翻译目录，比较原文与译文的 printf 参数序列，并拒绝重复格式键。
+- 对照 `IniHandler.cpp`、`Override.cpp` 的实际叠加层格式串检查覆盖率，包含相邻字符串
+  拼接；同时检查表达式语法错误及已知原因，新增重载错误未收录时测试失败。
+- 验证重复配置节、另一种未知配置项格式、哈希解析、表达式求值错误的中文，
+  保留原始英文、文件名、变量、错误位置和参数顺序；未知原因及 Mod 表达式原样保留。
+- 实际系统字形上传并用 SpriteBatch 绘制，回读绿色提示及橙红色重载告警像素，
+  并生成 `overlay-preview.bmp`。
 - 加载实际 Runtime，在中英文模式下各执行 32 次 Present，检查原有 PS SRV、
   空 RTV、视口和拓扑恢复，以及 GDI 对象数量稳定。
 - 中文模式日志应只有一次字库创建记录，英文模式不应创建中文字体。

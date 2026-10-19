@@ -887,6 +887,7 @@ void HackerContext::RestoreInputLayout()
 
 void HackerContext::BeforeDraw(DrawContext &data)
 {
+	MarkFrameCommands();
 	draw_number++;
 
 	Profiling::State profiling_state;
@@ -1832,6 +1833,7 @@ STDMETHODIMP_(void) HackerContext::SOSetTargets(THIS_
 
 bool HackerContext::BeforeDispatch(DispatchContext *context)
 {
+	MarkFrameCommands();
 	dispatch_number++;
 
 	if (G->hunting == HUNTING_MODE_ENABLED) {
@@ -2270,6 +2272,7 @@ STDMETHODIMP_(void) HackerContext::ExecuteCommandList(THIS_
 {
 	if (G->deferred_contexts_enabled) {
 		mOrigContext1->ExecuteCommandList(pCommandList, RestoreContextState);
+		MarkFrameCommands();
 		command_list_number++;
 	}
 

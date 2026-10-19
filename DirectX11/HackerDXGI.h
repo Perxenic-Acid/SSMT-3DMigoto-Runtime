@@ -1,7 +1,7 @@
 #pragma once
 
 #include <dxgi1_5.h>
-#include <atomic>
+#include <memory>
 
 #include "HackerDevice.h"
 #include "HackerContext.h"
@@ -14,6 +14,8 @@
 class HackerDevice;
 class HackerContext;
 class Overlay;
+struct SSMTFrameActionTarget;
+struct SSMTFrameActionGroup;
 
 
 void InstallSetWindowPosHook();
@@ -30,7 +32,8 @@ protected:
 	IDXGISwapChain3 *mOrigSwapChain3;
 	// Borrowed from the same COM object as mOrigSwapChain1; no extra reference.
 	IDXGISwapChain4 *mOrigSwapChain4;
-	std::atomic<HackerSwapChain *> mFrameActionOwner{nullptr};
+	std::shared_ptr<SSMTFrameActionGroup> mFrameActionGroup;
+	std::shared_ptr<SSMTFrameActionTarget> mFrameActionTarget;
 	HackerDevice *mHackerDevice;
 	HackerContext *mHackerContext;
 
@@ -38,7 +41,6 @@ public:
 	HackerSwapChain(IDXGISwapChain1 *pSwapChain, HackerDevice *pDevice, HackerContext *pContext);
 	
 	IDXGISwapChain1* GetOrigSwapChain1();
-	void RunFrameActions();
 	void DrawFrameOverlay();
 	void RegisterFrameActionOwner(bool device_was_wrapped);
 	Overlay *mOverlay;

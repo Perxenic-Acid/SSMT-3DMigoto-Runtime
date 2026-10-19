@@ -75,6 +75,7 @@
 #include "SSMTBridge.h"
 
 #include <mutex>
+#include <atomic>
 #include <algorithm>
 #include <vector>
 
@@ -276,10 +277,97 @@ private:
 GimiHostedReShadeRuntime gGimiHostedReShadeRuntime;
 
 std::mutex gFrameActionOwnerMutex;
-HackerSwapChain *gPreferredFrameActionOwner = nullptr; // Borrowed; protected by the mutex.
-std::vector<HackerSwapChain *> gPendingAuxiliarySwapChains;
+std::weak_ptr<SSMTFrameActionGroup> gFrameActionGroup;
 }
 
+// 全局 INI 只有一组 Present 命令与 CustomResource，不能在辅助设备上再执行一遍。
+// 目标只持有 Device / Context，不反向持有交换链，避免交换链之间的 COM 引用环。
+struct SSMTFrameActionTarget
+{
+	HackerDevice *device;
+	HackerContext *context;
+	bool wrapped;
+	bool registered = true; // 仅在 gFrameActionOwnerMutex 下访问。
+
+	SSMTFrameActionTarget(HackerDevice *device, HackerContext *context, bool wrapped)
+		: device(device), context(context), wrapped(wrapped)
+	{
+		device->AddRef();
+		context->AddRef();
+	}
+	~SSMTFrameActionTarget()
+	{
+		context->Release();
+		device->Release();
+	}
+};
+
+struct SSMTFrameActionGroup
+{
+	std::vector<std::weak_ptr<SSMTFrameActionTarget>> targets;
+	std::shared_ptr<SSMTFrameActionTarget> selected;
+	std::atomic<bool> rendering_owner{false};
+
+	// 注册与撤销只在冷路径持锁；正常 Present 只取得一份有生命周期保障的快照。
+	std::shared_ptr<SSMTFrameActionTarget> Acquire(
+		const std::shared_ptr<SSMTFrameActionTarget> &candidate, bool has_commands)
+	{
+		auto current = std::atomic_load_explicit(&selected, std::memory_order_acquire);
+		if (!rendering_owner.load(std::memory_order_acquire)) {
+			std::lock_guard<std::mutex> lock(gFrameActionOwnerMutex);
+			if (!rendering_owner.load(std::memory_order_relaxed)) {
+				auto active = has_commands ? candidate : nullptr;
+				// 辅助 Present 可能先于游戏 Present；先找已有绘制，不能先清掉它的计数。
+				for (const auto &entry : targets) {
+					if (active)
+						break;
+					auto live = entry.lock();
+					if (live && live->registered && live->context->HasFrameCommands())
+						active = live;
+				}
+				if (active && active->registered) {
+					std::atomic_store_explicit(&selected, active, std::memory_order_release);
+					rendering_owner.store(true, std::memory_order_release);
+					LogInfo("SSMT frame actions: rendering device %p, context %p owns global Present commands\n",
+						active->device, active->context);
+				}
+			}
+			return std::atomic_load_explicit(&selected, std::memory_order_acquire);
+		}
+		return current;
+	}
+
+	void Register(const std::shared_ptr<SSMTFrameActionTarget> &target)
+	{
+		targets.push_back(target);
+		// 首次游戏绘制前仍允许输入与延迟配置初始化；沿用原有包装设备优先级。
+		auto previous = std::atomic_load_explicit(&selected, std::memory_order_relaxed);
+		if (!rendering_owner.load(std::memory_order_relaxed) && (target->wrapped || !previous))
+			std::atomic_store_explicit(&selected, target, std::memory_order_release);
+	}
+
+	void Unregister(const std::shared_ptr<SSMTFrameActionTarget> &target)
+	{
+		std::lock_guard<std::mutex> lock(gFrameActionOwnerMutex);
+		target->registered = false;
+		auto previous = std::atomic_load_explicit(&selected, std::memory_order_relaxed);
+		if (previous != target)
+			return;
+		std::shared_ptr<SSMTFrameActionTarget> replacement;
+		for (auto it = targets.begin(); it != targets.end();) {
+			auto live = it->lock();
+			if (!live || !live->registered) {
+				it = targets.erase(it);
+				continue;
+			}
+			if (!replacement || live->wrapped)
+				replacement = live;
+			++it;
+		}
+		std::atomic_store_explicit(&selected, replacement, std::memory_order_release);
+		rendering_owner.store(false, std::memory_order_release);
+	}
+};
 
 
 
@@ -406,26 +494,15 @@ HackerSwapChain::HackerSwapChain(IDXGISwapChain1 *pSwapChain, HackerDevice *pDev
 
 void HackerSwapChain::RegisterFrameActionOwner(bool device_was_wrapped)
 {
+	mFrameActionTarget = std::make_shared<SSMTFrameActionTarget>(
+		mHackerDevice, mHackerContext, device_was_wrapped);
 	std::lock_guard<std::mutex> lock(gFrameActionOwnerMutex);
-	if (device_was_wrapped) {
-		// 无托管 ReShade 时显卡插层也可能在辅助设备 Present。
-		// 帧动作必须使用游戏设备，否则 Mod 资源会建在辅助设备上。
-		gPreferredFrameActionOwner = this;
-		for (HackerSwapChain *auxiliary : gPendingAuxiliarySwapChains) {
-			AddRef();
-			auxiliary->mFrameActionOwner.store(this, std::memory_order_release);
-			LogInfo("SSMT frame actions: auxiliary %p uses game swap chain %p\n",
-				auxiliary, this);
-		}
-		gPendingAuxiliarySwapChains.clear();
-	} else if (gPreferredFrameActionOwner) {
-		gPreferredFrameActionOwner->AddRef();
-		mFrameActionOwner.store(gPreferredFrameActionOwner, std::memory_order_release);
-		LogInfo("SSMT frame actions: auxiliary %p uses game swap chain %p\n",
-			this, gPreferredFrameActionOwner);
-	} else {
-		gPendingAuxiliarySwapChains.push_back(this);
+	mFrameActionGroup = gFrameActionGroup.lock();
+	if (!mFrameActionGroup) {
+		mFrameActionGroup = std::make_shared<SSMTFrameActionGroup>();
+		gFrameActionGroup = mFrameActionGroup;
 	}
+	mFrameActionGroup->Register(mFrameActionTarget);
 }
 
 IDXGISwapChain1* HackerSwapChain::GetOrigSwapChain1()
@@ -438,7 +515,7 @@ IDXGISwapChain1* HackerSwapChain::GetOrigSwapChain1()
 // Called at each DXGI::Present() to give us reliable time to execute user
 // input and hunting commands.
 
-void HackerSwapChain::RunFrameActions()
+static void RunFrameActions(HackerDevice *mHackerDevice, HackerContext *mHackerContext)
 {
 	LogDebug("Running frame actions.  Device: %p\n", mHackerDevice);
 	// 辅助交换链可在游戏尚未提交下一帧 Draw 时重复执行本方法。
@@ -689,19 +766,8 @@ STDMETHODIMP_(ULONG) HackerSwapChain::Release(THIS)
 
 	if (ulRef <= 0)
 	{
-		HackerSwapChain *frame_owner = nullptr;
-		{
-			std::lock_guard<std::mutex> lock(gFrameActionOwnerMutex);
-			if (gPreferredFrameActionOwner == this)
-				gPreferredFrameActionOwner = nullptr;
-			auto it = std::find(gPendingAuxiliarySwapChains.begin(),
-				gPendingAuxiliarySwapChains.end(), this);
-			if (it != gPendingAuxiliarySwapChains.end())
-				gPendingAuxiliarySwapChains.erase(it);
-			frame_owner = mFrameActionOwner.exchange(nullptr, std::memory_order_acq_rel);
-		}
-		if (frame_owner)
-			frame_owner->Release();
+		if (mFrameActionGroup)
+			mFrameActionGroup->Unregister(mFrameActionTarget);
 
 		if (mHackerDevice) {
 			if (mHackerDevice->GetHackerSwapChain() == this) {
@@ -839,6 +905,7 @@ STDMETHODIMP HackerSwapChain::Present(THIS_
 {
 	Profiling::State profiling_state = {0};
 	bool profiling = false;
+	std::shared_ptr<SSMTFrameActionTarget> frame_target;
 	LogDebug("HackerSwapChain::Present(%s@%p) called with\n", type_name(this), this);
 	LogDebug("  SyncInterval = %d\n", SyncInterval);
 	LogDebug("  Flags = %d\n", Flags);
@@ -875,11 +942,8 @@ STDMETHODIMP HackerSwapChain::Present(THIS_
 
 		// Every presented frame, we want to take some CPU time to run our actions,
 		// which enables hunting, and snapshots, and aiming overrides and other inputs
-		HackerSwapChain *frame_owner = mFrameActionOwner.load(std::memory_order_acquire);
-		if (frame_owner)
-			frame_owner->RunFrameActions();
-		else
-			RunFrameActions();
+		frame_target = mFrameActionGroup->Acquire(mFrameActionTarget, mHackerContext->HasFrameCommands());
+		RunFrameActions(frame_target->device, frame_target->context);
 		DrawFrameOverlay();
 
 		SSMTBridge::NotifyPresent(
@@ -909,7 +973,7 @@ STDMETHODIMP HackerSwapChain::Present(THIS_
 		// Run the post present command list now, which can be used to restore
 		// state changed in the pre-present command list, or to perform some
 		// action at the start of a frame:
-		RunCommandList(mHackerDevice, mHackerContext, &G->post_present_command_list, NULL, true);
+		RunCommandList(frame_target->device, frame_target->context, &G->post_present_command_list, NULL, true);
 
 		if (profiling)
 			Profiling::end(&profiling_state, &Profiling::present_overhead);
@@ -1211,6 +1275,7 @@ STDMETHODIMP HackerSwapChain::Present1(THIS_
 	Profiling::State profiling_state = {0};
 	gLogDebug = true;
 	bool profiling = false;
+	std::shared_ptr<SSMTFrameActionTarget> frame_target;
 
 	LogDebug("HackerSwapChain::Present1(%s@%p) called\n", type_name(this), this);
 	LogDebug("  SyncInterval = %d\n", SyncInterval);
@@ -1224,11 +1289,8 @@ STDMETHODIMP HackerSwapChain::Present1(THIS_
 
 		// Every presented frame, we want to take some CPU time to run our actions,
 		// which enables hunting, and snapshots, and aiming overrides and other inputs
-		HackerSwapChain *frame_owner = mFrameActionOwner.load(std::memory_order_acquire);
-		if (frame_owner)
-			frame_owner->RunFrameActions();
-		else
-			RunFrameActions();
+		frame_target = mFrameActionGroup->Acquire(mFrameActionTarget, mHackerContext->HasFrameCommands());
+		RunFrameActions(frame_target->device, frame_target->context);
 		DrawFrameOverlay();
 
 		SSMTBridge::NotifyPresent(
@@ -1258,7 +1320,7 @@ STDMETHODIMP HackerSwapChain::Present1(THIS_
 		// Run the post present command list now, which can be used to restore
 		// state changed in the pre-present command list, or to perform some
 		// action at the start of a frame:
-		RunCommandList(mHackerDevice, mHackerContext, &G->post_present_command_list, NULL, true);
+		RunCommandList(frame_target->device, frame_target->context, &G->post_present_command_list, NULL, true);
 
 		if (profiling)
 			Profiling::end(&profiling_state, &Profiling::present_overhead);

@@ -19,6 +19,10 @@
 #include "HackerContext.h"
 
 #include <stdexcept>
+#include <atomic>
+#include <set>
+#include "SSMTOverlayText.h"
+#include "SSMTOverlayFont.h"
 
 #define MAX_SIMULTANEOUS_NOTICES 10
 
@@ -30,6 +34,7 @@ static class Notices
 public:
 	std::vector<OverlayNotice> notices[NUM_LOG_LEVELS];
 	CRITICAL_SECTION lock;
+	std::atomic<uint64_t> generation{1};
 
 	Notices()
 	{
@@ -748,11 +753,13 @@ void Overlay::DrawNotices(float *y)
 				continue;
 			}
 
-			strSize = (this->*log_levels[level].font)->MeasureString(notice->message.c_str());
+			auto font = mUseChinese ? mChineseFont.get() : (this->*log_levels[level].font).get();
+			const auto& message = mUseChinese && !notice->chinese.empty() ? notice->chinese : notice->message;
+			strSize = font->MeasureString(message.c_str());
 
 			DrawRectangle(0, *y, strSize.x + 3, strSize.y, 0, 0, 0, 0.75);
 
-			(this->*log_levels[level].font)->DrawString(mSpriteBatch.get(), notice->message.c_str(), Vector2(0, *y), log_levels[level].colour);
+			font->DrawString(mSpriteBatch.get(), message.c_str(), Vector2(0, *y), log_levels[level].colour);
 			*y += strSize.y + 5;
 
 			has_notice = true;
@@ -776,12 +783,47 @@ void Overlay::DrawProfiling(float *y)
 	mFontProfiling->DrawString(mSpriteBatch.get(), Profiling::text.c_str(), Vector2(0, *y), DirectX::Colors::Goldenrod);
 }
 
-static void CreateInfoString(wchar_t* info)
+static void CreateInfoString(wchar_t* info, bool chinese)
 {
 	const wchar_t* marking_mode;
 	marking_mode = lookup_enum_name(MarkingModeNames, G->marking_mode);
 
-	swprintf_s(info, maxstring, L"Shader Hunting Mode (marking: %ls)", marking_mode);
+	swprintf_s(info, maxstring, SSMTOverlayText::HuntingFormat(chinese), marking_mode);
+}
+
+void Overlay::PrepareLocalizedFont()
+{
+	mUseChinese = SSMTOverlayText::UseChinese() && !mChineseFontFailed;
+	if (!mUseChinese) return;
+	const auto generation = notices.generation.load(std::memory_order_relaxed);
+	if (mChineseFont && mNoticeGeneration == generation) return;
+
+	try {
+		// 仅新增提示触发字形检查；GDI 和纹理创建均在 SpriteBatch::Begin 之前完成。
+		std::wstring characters = mChineseCharacters;
+		if (!mChineseFont) characters = SSMTOverlayText::FontCharacters();
+		{
+			CriticalSectionGuard(&notices.lock);
+			for (const auto& level : notices.notices) {
+				for (const auto& notice : level)
+					characters += notice.chinese.empty() ? notice.message : notice.chinese;
+			}
+		}
+		std::set<wchar_t> unique(characters.begin(), characters.end());
+		characters.assign(unique.begin(), unique.end());
+		if (!mChineseFont || characters != mChineseCharacters) {
+			auto font = SSMTOverlayFont::Create(mOrigDevice, characters);
+			mChineseFont = std::move(font);
+			mChineseCharacters = std::move(characters);
+			LogInfo("SSMT overlay: Microsoft YaHei atlas cached (%zu characters)\n", mChineseCharacters.size());
+		}
+		mNoticeGeneration = generation;
+	} catch (const std::exception& error) {
+		// 缺少系统字体或纹理创建失败时继续使用内置英文字体，不阻断 Present。
+		mChineseFontFailed = true;
+		mUseChinese = false;
+		LogInfo("SSMT overlay: Microsoft YaHei unavailable, using English (%s)\n", error.what());
+	}
 }
 
 void Overlay::DrawOverlay(void)
@@ -794,6 +836,7 @@ void Overlay::DrawOverlay(void)
 
 	if (Profiling::mode == Profiling::Mode::SUMMARY)
 		Profiling::start(&profiling_state);
+	PrepareLocalizedFont();
 
 	// Since some games did not like having us change their drawing state from
 	// SpriteBatch, we now save and restore all state information for the GPU
@@ -822,10 +865,11 @@ void Overlay::DrawOverlay(void)
 				DrawShaderInfoLines(&y);
 
 				// Bottom of screen
-				CreateInfoString(osdString);
-				strSize = mFont->MeasureString(osdString);
+				CreateInfoString(osdString, mUseChinese);
+				auto infoFont = mUseChinese ? mChineseFont.get() : mFont.get();
+				strSize = infoFont->MeasureString(osdString);
 				textPosition = Vector2(float(mResolution.x - strSize.x) / 2, float(mResolution.y - strSize.y - 10));
-				DrawOutlinedString(mFont.get(), osdString, textPosition, DirectX::Colors::LimeGreen);
+				DrawOutlinedString(infoFont, osdString, textPosition, DirectX::Colors::LimeGreen);
 			}
 
 			if (has_notice)
@@ -845,8 +889,9 @@ fail_restore:
 		Profiling::end(&profiling_state, &Profiling::overlay_overhead);
 }
 
-OverlayNotice::OverlayNotice(std::wstring message) :
-	message(message),
+OverlayNotice::OverlayNotice(std::wstring message, std::wstring chinese) :
+	message(std::move(message)),
+	chinese(std::move(chinese)),
 	timestamp(0)
 {
 }
@@ -869,7 +914,7 @@ void ClearNotices()
 	LeaveCriticalSection(&notices.lock);
 }
 
-void LogOverlayW(LogLevel level, wchar_t *fmt, ...)
+void LogOverlayW(LogLevel level, const wchar_t *fmt, ...)
 {
 	bool show_overlay_message = (level == LOG_INFO) || G->gShowWarnings;
 
@@ -880,7 +925,10 @@ void LogOverlayW(LogLevel level, wchar_t *fmt, ...)
 
 	va_start(ap, fmt);
 
-	vLogWarningW(fmt, ap);
+	va_list log_args;
+	va_copy(log_args, ap);
+	vLogWarningW(fmt, log_args);
+	va_end(log_args);
 
 	if (!show_overlay_message) {
 		va_end(ap);
@@ -891,12 +939,12 @@ void LogOverlayW(LogLevel level, wchar_t *fmt, ...)
 	// the buffer, and truncate it instead - unless we can automatically
 	// wrap the message, which DirectXTK doesn't appear to support, who
 	// cares if it gets cut off somewhere off screen anyway?
-	wchar_t msg[maxstring];
-	_vsnwprintf_s(msg, maxstring, _TRUNCATE, fmt, ap);
+	auto message = SSMTOverlayText::Format(fmt, ap);
 
 	EnterCriticalSectionPretty(&notices.lock);
 
-	notices.notices[level].emplace_back(msg);
+	notices.notices[level].emplace_back(std::move(message.english), std::move(message.chinese));
+	notices.generation.fetch_add(1, std::memory_order_relaxed);
 	has_notice = true;
 
 	LeaveCriticalSection(&notices.lock);
@@ -909,7 +957,7 @@ void LogOverlayW(LogLevel level, wchar_t *fmt, ...)
 // to LogOverlayW, because that would reverse the meaning of %s and %S in the
 // format string. Instead we do our own vLogInfo and _vsnprintf_s to handle the
 // format string correctly and convert the result to a wide string.
-void LogOverlay(LogLevel level, char *fmt, ...)
+void LogOverlay(LogLevel level, const char *fmt, ...)
 {
 	bool show_overlay_message = (level == LOG_INFO) || G->gShowWarnings;
 
@@ -920,7 +968,10 @@ void LogOverlay(LogLevel level, char *fmt, ...)
 
 	va_start(ap, fmt);
 
-	vLogWarning(fmt, ap);
+	va_list log_args;
+	va_copy(log_args, ap);
+	vLogWarning(fmt, log_args);
+	va_end(log_args);
 
 	if (!show_overlay_message) {
 		va_end(ap);
@@ -928,19 +979,12 @@ void LogOverlay(LogLevel level, char *fmt, ...)
 	}
 
 	if (!log_levels[level].hide_in_release || G->hunting) {
-		char amsg[maxstring];
-		wchar_t wmsg[maxstring];
-
-		// Using _vsnprintf_s so we don't crash if the message is too long for
-		// the buffer, and truncate it instead - unless we can automatically
-		// wrap the message, which DirectXTK doesn't appear to support, who
-		// cares if it gets cut off somewhere off screen anyway?
-		_vsnprintf_s(amsg, maxstring, _TRUNCATE, fmt, ap);
-		mbstowcs(wmsg, amsg, maxstring);
+		auto message = SSMTOverlayText::Format(fmt, ap);
 
 		EnterCriticalSectionPretty(&notices.lock);
 
-		notices.notices[level].emplace_back(wmsg);
+		notices.notices[level].emplace_back(std::move(message.english), std::move(message.chinese));
+		notices.generation.fetch_add(1, std::memory_order_relaxed);
 		has_notice = true;
 
 		LeaveCriticalSection(&notices.lock);

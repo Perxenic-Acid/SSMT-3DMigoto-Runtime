@@ -63,7 +63,15 @@
     <ClCompile Include="IniHandler.cpp" />
     <ClCompile Include="Input.cpp" />
     <ClCompile Include="lock.cpp" />
-    <ClCompile Include="Overlay.cpp" />
+    <ClCompile Include="Overlay.cpp">
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="SSMTOverlayText.cpp">
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="SSMTOverlayFont.cpp">
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="Override.cpp" />
     <ClCompile Include="profiling.cpp" />
     <ClCompile Include="ResourceHash.cpp" />
@@ -99,6 +107,8 @@
     <ClInclude Include="Input.h" />
     <ClInclude Include="lock.h" />
     <ClInclude Include="Overlay.h" />
+    <ClInclude Include="SSMTOverlayText.h" />
+    <ClInclude Include="SSMTOverlayFont.h" />
     <ClInclude Include="CommandList.h" />
     <ClInclude Include="Override.h" />
     <ClInclude Include="profiling.h" />

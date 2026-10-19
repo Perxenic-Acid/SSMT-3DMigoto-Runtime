@@ -15,6 +15,7 @@
 #include "Override.h"
 #include "Hunting.h"
 #include "ShaderRegex.h"
+#include "SSMTOverlayText.h"
 #include "cursor.h"
 #include <chrono>
 
@@ -4870,6 +4871,12 @@ void LoadConfigFile()
 
 	// [Hunting]
 	ParseHuntingSection();
+	wchar_t overlay_language[32];
+	GetIniStringAndLog(L"Hunting", L"overlay_language", L"auto", overlay_language, _countof(overlay_language));
+	if (!SSMTOverlayText::Configure(overlay_language)) {
+		SSMTOverlayText::Configure(L"auto");
+		LogWarningW(L"Unknown overlay_language=%ls, using auto\n", overlay_language);
+	}
 
 	// Must be done prior to parsing any command list sections, as every
 	// section registered in this set will be a candidate for optimisation:

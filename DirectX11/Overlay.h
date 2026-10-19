@@ -30,9 +30,10 @@ enum LogLevel {
 class OverlayNotice {
 public:
 	std::wstring message;
+	std::wstring chinese;
 	DWORD timestamp;
 
-	OverlayNotice(std::wstring message);
+	OverlayNotice(std::wstring message, std::wstring chinese);
 };
 
 class Overlay
@@ -50,6 +51,12 @@ private:
 	std::unique_ptr<DirectX::BasicEffect> mEffect;
 	std::unique_ptr<DirectX::PrimitiveBatch<DirectX::VertexPositionColor>> mPrimitiveBatch;
 	Microsoft::WRL::ComPtr<ID3D11InputLayout> mInputLayout;
+	std::unique_ptr<DirectX::SpriteFont> mChineseFont;
+	std::wstring mChineseCharacters;
+	uint64_t mNoticeGeneration = 0;
+	bool mChineseFontFailed = false;
+	bool mUseChinese = false;
+	void PrepareLocalizedFont();
 
 	// These are all state that we save away before drawing the overlay and
 	// restore again afterwards. Basically everything that DirectTK
@@ -118,5 +125,5 @@ public:
 };
 
 void ClearNotices();
-void LogOverlayW(LogLevel level, wchar_t *fmt, ...);
-void LogOverlay(LogLevel level, char *fmt, ...);
+void LogOverlayW(LogLevel level, const wchar_t *fmt, ...);
+void LogOverlay(LogLevel level, const char *fmt, ...);

@@ -9,6 +9,8 @@
     <ClCompile Include="IniHandler.cpp" />
     <ClCompile Include="Input.cpp" />
     <ClCompile Include="Overlay.cpp" />
+    <ClCompile Include="SSMTOverlayText.cpp" />
+    <ClCompile Include="SSMTOverlayFont.cpp" />
     <ClCompile Include="..\HLSLDecompiler\DecompileHLSL.cpp" />
     <ClCompile Include="HookedDXGI.cpp" />
     <ClCompile Include="FrameAnalysis.cpp" />
@@ -45,6 +47,8 @@
     <ClInclude Include="IniHandler.h" />
     <ClInclude Include="Input.h" />
     <ClInclude Include="Overlay.h" />
+    <ClInclude Include="SSMTOverlayText.h" />
+    <ClInclude Include="SSMTOverlayFont.h" />
     <ClInclude Include="..\vkeys.h" />
     <ClInclude Include="..\HLSLDecompiler\DecompileHLSL.h" />
     <ClInclude Include="HookedDXGI.h" />
